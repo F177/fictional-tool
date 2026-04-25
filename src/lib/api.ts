@@ -32,7 +32,7 @@ export interface ApiPage {
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
 
-export type DrawTool = "pen" | "rect" | "circle" | "arrow";
+export type DrawTool = "pen" | "rect" | "circle" | "arrow" | "line" | "triangle" | "star" | "diamond";
 
 export interface DrawnShape {
   id       : string;
@@ -107,6 +107,11 @@ export interface AddedWordItem {
   color         : number;   // sRGB 0xRRGGBB
   dx?           : number;
   dy?           : number;
+  rotation?     : number;  // degrees, 0 = upright
+  lineHeight?   : number;  // CSS line-height multiplier, default 1.3
+  listType?     : "none" | "bullet" | "numbered";
+  w?            : number;  // fixed width in PDF points (overrides auto-size)
+  h?            : number;  // fixed height in PDF points
 }
 
 /** Patch applied by the toolbar — superset of WordEdit fields + added-word-only fields. */
@@ -120,6 +125,9 @@ export type FormatPatch = {
   strikethrough?: boolean;
   highlight?    : string | null;
   textAlign?    : "left" | "center" | "right";
+  rotation?     : number;
+  lineHeight?   : number;
+  listType?     : "none" | "bullet" | "numbered";
 };
 
 /** A placed image or signature on a page. */

@@ -8,6 +8,16 @@ import DrawingOverlay from "./DrawingOverlay";
 import StickyNoteOverlay from "./StickyNoteOverlay";
 import FormFieldOverlay from "./FormFieldOverlay";
 
+// ── List rendering helper ─────────────────────────────────────────────────────
+
+function applyListType(text: string, listType?: "none" | "bullet" | "numbered"): string {
+  if (!listType || listType === "none") return text;
+  const lines = text.split("\n");
+  if (listType === "bullet")
+    return lines.map(l => (l.trim() ? `• ${l}` : l)).join("\n");
+  return lines.map((l, i) => (l.trim() ? `${i + 1}. ${l}` : l)).join("\n");
+}
+
 // ── Font metric helpers ───────────────────────────────────────────────────────
 
 const _ascentCache = new Map<string, number>();
@@ -25,11 +35,13 @@ function fontAscent(family: string, weight: string, style: string, size: number)
   return ascent;
 }
 
+const _measureCanvas = typeof document !== "undefined" ? document.createElement("canvas") : null;
+const _measureCtx    = _measureCanvas?.getContext("2d") ?? null;
+
 function measureTextWidth(text: string, family: string, weight: string, style: string, size: number): number {
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d")!;
-  ctx.font = `${style} ${weight} ${size}px ${family}`;
-  return ctx.measureText(text).width;
+  if (!_measureCtx) return size * text.length * 0.6;
+  _measureCtx.font = `${style} ${weight} ${size}px ${family}`;
+  return _measureCtx.measureText(text).width;
 }
 
 function numToColor(n: number) {
@@ -182,12 +194,24 @@ function WordOverlay({
   useLayoutEffect(() => {
     const span = spanRef.current;
     if (!span || isEditing || !wordEdit) return;
+    // Only shrink font when showing the original unchanged text that must fit its PDF bounding box.
+    // When the user has changed the text, keep the font at natural size and expand the container.
+    const userChangedText = wordEdit.text !== undefined && wordEdit.text !== word.text;
     const naturalW = measureTextWidth(displayText, fontFamily, fontWeight, fontStyle, baseFontPx);
-    const usedSize = naturalW > w && naturalW > 0 ? baseFontPx * (w / naturalW) : baseFontPx;
+    const usedSize = (!userChangedText && naturalW > w && naturalW > 0)
+      ? baseFontPx * (w / naturalW)
+      : baseFontPx;
     span.style.fontSize = `${usedSize}px`;
     const ascent = fontAscent(fontFamily, fontWeight, fontStyle, usedSize);
     span.style.top = `${baselineFromTop - ascent}px`;
-  }, [displayText, wordEdit, isEditing, w, baseFontPx, fontFamily, fontWeight, fontStyle, baselineFromTop]);
+
+    // Resize the parent container to match the new text width so the selection outline fits.
+    if (userChangedText) {
+      const newW = measureTextWidth(displayText, fontFamily, fontWeight, fontStyle, usedSize);
+      const container = span.parentElement;
+      if (container) container.style.width = `${Math.max(newW + 8, w)}px`;
+    }
+  }, [displayText, wordEdit, isEditing, w, baseFontPx, fontFamily, fontWeight, fontStyle, baselineFromTop, word.text]);
 
   const handleDragStart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -247,7 +271,15 @@ function WordOverlay({
   const startEdit = () => {
     onSelect(false);
     setIsEditing(true);
-    setTimeout(() => { inputRef.current?.focus(); inputRef.current?.select(); }, 0);
+    setTimeout(() => {
+      const ta = inputRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.select();
+      // Auto-size to content on open
+      ta.style.height = "auto";
+      ta.style.height = `${ta.scrollHeight + 2}px`;
+    }, 0);
   };
 
   const commit = (text: string) => {
@@ -268,19 +300,19 @@ function WordOverlay({
   const showHandle = (isHovered || isDragging.current) && !isEditing;
 
   const outlineStyle = isEditing
-    ? "1.5px solid #8b5cf6"
+    ? "1.5px solid #f97316"
     : isCurrentHighlight ? "2px solid #f59e0b"
     : isHighlighted ? "2px solid #fbbf24"
-    : isSelected    ? "1.5px solid #8b5cf6"
-    : isHovered     ? "1px dashed rgba(139,92,246,0.55)"
-    : (showEditIndicator && wordEdit && !wordEdit.deleted) ? "1px dashed rgba(139,92,246,0.30)"
+    : isSelected    ? "1.5px solid #f97316"
+    : isHovered     ? "1px dashed rgba(249,115,22,0.55)"
+    : (showEditIndicator && wordEdit && !wordEdit.deleted) ? "1px dashed rgba(249,115,22,0.30)"
     : "none";
 
   const bgStyle = isEditing
     ? "white"
     : isCurrentHighlight ? "rgba(251,191,36,0.35)"
     : isHighlighted ? "rgba(253,224,71,0.25)"
-    : isHovered ? "rgba(139,92,246,0.13)"
+    : isHovered ? "rgba(249,115,22,0.13)"
     : "transparent";
 
   return (
@@ -305,7 +337,7 @@ function WordOverlay({
             top         : -22,
             left        : "50%",
             transform   : "translateX(-50%)",
-            background  : "#8b5cf6",
+            background  : "#f97316",
             borderRadius: 4,
             padding     : "2px 5px",
             cursor      : "grab",
@@ -345,32 +377,37 @@ function WordOverlay({
           <textarea
             ref={inputRef}
             defaultValue={displayText}
-            rows={1}
             style={{
               position    : "absolute",
               top         : 0,
               left        : 0,
-              width       : Math.max(w * 2.5, 160),
-              height      : Math.max(h * 1.6, 28),
+              minWidth    : Math.max(w * 3, 220),
+              minHeight   : Math.max(h * 1.8, 32),
+              width       : "auto",
+              height      : "auto",
               fontSize    : baseFontPx,
               fontFamily,
               fontWeight,
               fontStyle,
-              lineHeight  : 1.15,
+              lineHeight  : 1.4,
               padding     : "1px 3px",
-              background  : "white",
               color,
-              border      : "1.5px solid #8b5cf6",
+              background  : "transparent",
+              border      : "none",
+              outline     : "1.5px solid #f97316",
               borderRadius: 2,
-              resize      : "none",
-              outline     : "none",
+              resize      : "both",
               zIndex      : 30,
               boxSizing   : "border-box",
-              boxShadow   : "0 2px 8px rgba(0,0,0,0.18)",
+              overflowY   : "auto",
+            }}
+            onInput={(e) => {
+              const ta = e.currentTarget;
+              ta.style.height = "auto";
+              ta.style.height = `${ta.scrollHeight + 2}px`;
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit((e.target as HTMLTextAreaElement).value); }
-              if (e.key === "Escape") setIsEditing(false);
+              if (e.key === "Escape") { e.preventDefault(); commit((e.target as HTMLTextAreaElement).value); }
             }}
             onBlur={(e) => commit(e.target.value)}
           />
@@ -435,7 +472,8 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
 
   const ascent     = fontAscent(fontFamily, fontWeight, fontStyle, fontSizePx);
   const textW      = measureTextWidth(item.text || "W", fontFamily, fontWeight, fontStyle, fontSizePx);
-  const boxW       = Math.max(textW, 80);
+  const boxW       = item.w ? item.w * scale : Math.max(textW, 80);
+  const boxH       = item.h ? item.h * scale : undefined;
   const rawLeftPx  = (item.x + dx) * scale;
   const leftPx     = item.textAlign === "center"
     ? rawLeftPx - textW / 2
@@ -449,7 +487,13 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
   ].filter(Boolean).join(" ") || "none";
 
   useEffect(() => {
-    if (isEditing) setTimeout(() => { inputRef.current?.focus(); }, 30);
+    if (isEditing) setTimeout(() => {
+      const ta = inputRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.style.height = "auto";
+      ta.style.height = `${ta.scrollHeight}px`;
+    }, 30);
   }, [isEditing]);
 
   const handleDragStart = (e: React.MouseEvent) => {
@@ -506,7 +550,8 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
       onClick={(e) => { e.stopPropagation(); onSelect(e.shiftKey); }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      style={{ position: "absolute", left: leftPx, top: topPx, zIndex: isEditing ? 20 : 11 }}
+      data-inline-selected={isSelected ? "" : undefined}
+      style={{ position: "absolute", left: leftPx, top: topPx, zIndex: isEditing ? 20 : 11, transform: `rotate(${item.rotation ?? 0}deg)`, transformOrigin: "left top" }}
     >
       {/* Delete button */}
       {showControls && (
@@ -526,13 +571,14 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
         </button>
       )}
 
-      {/* Drag handle */}
-      {showControls && (
+      {/* Drag handle — hidden when in a group (GroupBox provides centralized handle) */}
+      {showControls && !groupId && (
         <div
           onMouseDown={handleDragStart}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: "absolute", top: -22, left: "50%", transform: "translateX(-50%)",
-            background: "#8b5cf6", borderRadius: 4, padding: "2px 5px",
+            background: "#f97316", borderRadius: 4, padding: "2px 5px",
             cursor: "grab", zIndex: 30, display: "flex", alignItems: "center",
             gap: 3, userSelect: "none", boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
           }}
@@ -545,20 +591,30 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
         <textarea
           ref={inputRef}
           defaultValue={item.text}
-          rows={1}
           style={{
             fontSize: fontSizePx, fontFamily, fontWeight, fontStyle,
             textDecoration, textAlign: item.textAlign ?? "left",
-            color, background: "white",
-            border: "1.5px solid #8b5cf6", borderRadius: 2,
-            outline: "none", resize: "none",
-            padding: "1px 3px", lineHeight: 1.15,
-            minWidth: Math.max(boxW + 20, 120),
-            zIndex: 30, boxShadow: "0 2px 8px rgba(0,0,0,0.18)",
-            boxSizing: "border-box",
+            color,
+            background  : "transparent",
+            border      : "none",
+            outline     : "1.5px solid #f97316",
+            borderRadius: 2,
+            resize      : "horizontal",
+            padding: "1px 3px", lineHeight: item.lineHeight ?? 1.3,
+            minWidth: item.w ? undefined : 80,
+            width: item.w ? `${item.w * scale}px` : undefined,
+            height: item.h ? `${item.h * scale}px` : "auto",
+            minHeight: undefined,
+            zIndex: 30,
+            boxSizing: "border-box", overflowY: "hidden",
+          }}
+          onInput={(e) => {
+            if (item.h) return;
+            const ta = e.currentTarget;
+            ta.style.height = "auto";
+            ta.style.height = `${ta.scrollHeight}px`;
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit((e.target as HTMLTextAreaElement).value); }
             if (e.key === "Escape") { if (!item.text) onRemove(); else setIsEditing(false); }
           }}
           onBlur={(e) => commit(e.target.value)}
@@ -567,17 +623,109 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
         <span
           onDoubleClick={() => { onSelect(false); setIsEditing(true); }}
           style={{
-            display: "block", fontSize: fontSizePx, fontFamily, fontWeight, fontStyle,
+            display: item.w ? "block" : "inline-block",
+            width: item.w ? `${boxW}px` : undefined,
+            height: item.h ? `${boxH}px` : undefined,
+            overflow: item.h ? "hidden" : undefined,
+            fontSize: fontSizePx, fontFamily, fontWeight, fontStyle,
             textDecoration, textAlign: item.textAlign ?? "left",
-            color, whiteSpace: "nowrap", lineHeight: 1, cursor: "text",
+            color, whiteSpace: "pre-wrap", wordBreak: "break-word",
+            lineHeight: item.lineHeight ?? 1.3, cursor: "text", minWidth: item.w ? undefined : 40,
             padding: "1px 2px",
             outline: isSelected
-              ? "1.5px solid #8b5cf6"
-              : isHovered ? "1px dashed rgba(139,92,246,0.55)" : "1px dashed rgba(139,92,246,0.35)",
+              ? "1.5px solid #f97316"
+              : isHovered ? "1px dashed rgba(249,115,22,0.55)" : "1px dashed rgba(249,115,22,0.35)",
           }}
         >
-          {item.text}
+          {applyListType(item.text, item.listType)}
         </span>
+      )}
+
+      {/* Text box resize handles — shown when selected */}
+      {isSelected && (
+        <>
+          {/* SE corner handle */}
+          <div
+            onMouseDown={(e) => {
+              e.preventDefault(); e.stopPropagation();
+              const startX = e.clientX, startY = e.clientY;
+              const curW = item.w ?? (textW / scale + 6);
+              const curH = item.h ?? (fontSizePx * 1.3 / scale + 4);
+              const onMove = (ev: MouseEvent) => {
+                const nw = Math.max(40 / scale, curW + (ev.clientX - startX) / scale);
+                const nh = Math.max(12 / scale, curH + (ev.clientY - startY) / scale);
+                onEdit({ ...item, w: nw, h: nh });
+              };
+              const onUp = (ev: MouseEvent) => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+                const nw = Math.max(40 / scale, curW + (ev.clientX - startX) / scale);
+                const nh = Math.max(12 / scale, curH + (ev.clientY - startY) / scale);
+                onEdit({ ...item, w: nw, h: nh });
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+            style={{
+              position: "absolute", right: -4, bottom: -4,
+              width: 8, height: 8, background: "white",
+              border: "1.5px solid #f97316", borderRadius: 1,
+              cursor: "se-resize", zIndex: 35,
+            }}
+          />
+          {/* E edge handle */}
+          <div
+            onMouseDown={(e) => {
+              e.preventDefault(); e.stopPropagation();
+              const startX = e.clientX;
+              const curW = item.w ?? (textW / scale + 6);
+              const onMove = (ev: MouseEvent) => {
+                const nw = Math.max(40 / scale, curW + (ev.clientX - startX) / scale);
+                onEdit({ ...item, w: nw });
+              };
+              const onUp = (ev: MouseEvent) => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+                const nw = Math.max(40 / scale, curW + (ev.clientX - startX) / scale);
+                onEdit({ ...item, w: nw });
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+            style={{
+              position: "absolute", right: -4, top: "50%", transform: "translateY(-50%)",
+              width: 8, height: 8, background: "white",
+              border: "1.5px solid #f97316", borderRadius: 1,
+              cursor: "e-resize", zIndex: 35,
+            }}
+          />
+          {/* S edge handle */}
+          <div
+            onMouseDown={(e) => {
+              e.preventDefault(); e.stopPropagation();
+              const startY = e.clientY;
+              const curH = item.h ?? (fontSizePx * 1.3 / scale + 4);
+              const onMove = (ev: MouseEvent) => {
+                const nh = Math.max(12 / scale, curH + (ev.clientY - startY) / scale);
+                onEdit({ ...item, h: nh });
+              };
+              const onUp = (ev: MouseEvent) => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+                const nh = Math.max(12 / scale, curH + (ev.clientY - startY) / scale);
+                onEdit({ ...item, h: nh });
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+            style={{
+              position: "absolute", bottom: -4, left: "50%", transform: "translateX(-50%)",
+              width: 8, height: 8, background: "white",
+              border: "1.5px solid #f97316", borderRadius: 1,
+              cursor: "s-resize", zIndex: 35,
+            }}
+          />
+        </>
       )}
     </div>
   );
@@ -687,13 +835,14 @@ function AddedImageOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove
       onMouseLeave={() => setIsHovered(false)}
       style={{ position: "absolute", left: x, top: y, width: w, height: h, zIndex: 12 }}
     >
-      {/* Drag handle */}
-      {showControls && (
+      {/* Drag handle — hidden when in a group (GroupBox provides centralized handle) */}
+      {showControls && !groupId && (
         <div
           onMouseDown={handleDragStart}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: "absolute", top: -22, left: "50%", transform: "translateX(-50%)",
-            background: "#8b5cf6", borderRadius: 4, padding: "2px 5px",
+            background: "#f97316", borderRadius: 4, padding: "2px 5px",
             cursor: "grab", zIndex: 30, display: "flex", alignItems: "center",
             boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
           }}
@@ -728,8 +877,8 @@ function AddedImageOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove
         style={{
           width: "100%", height: "100%", display: "block", objectFit: "fill",
           outline: isSelected
-            ? "1.5px solid #8b5cf6"
-            : isHovered ? "1px dashed rgba(139,92,246,0.55)" : "none",
+            ? "1.5px solid #f97316"
+            : isHovered ? "1px dashed rgba(249,115,22,0.55)" : "none",
         }}
       />
 
@@ -741,13 +890,60 @@ function AddedImageOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove
           style={{
             position: "absolute",
             width: 8, height: 8,
-            background: "white", border: "1.5px solid #8b5cf6", borderRadius: 1,
+            background: "white", border: "1.5px solid #f97316", borderRadius: 1,
             cursor: `${corner}-resize`, zIndex: 35,
             ...(corner.includes("n") ? { top: -4 }    : { bottom: -4 }),
             ...(corner.includes("w") ? { left: -4 }   : { right:  -4 }),
           }}
         />
       ))}
+    </div>
+  );
+}
+
+// ── GroupBox ──────────────────────────────────────────────────────────────────
+
+interface GroupBoxProps {
+  groupId: string;
+  x: number; y: number; w: number; h: number;
+  scale: number;
+  onGroupDragEnd: (groupId: string, dx: number, dy: number) => void;
+}
+function GroupBox({ groupId, x, y, w, h, scale, onGroupDragEnd }: GroupBoxProps) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const handleDragStart = (e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    const startX = e.clientX, startY = e.clientY;
+    const onMove = (ev: MouseEvent) => {
+      if (boxRef.current) {
+        boxRef.current.style.transform = `translate(${ev.clientX - startX}px,${ev.clientY - startY}px)`;
+      }
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      if (boxRef.current) boxRef.current.style.transform = "";
+      const ddx = (ev.clientX - startX) / scale;
+      const ddy = (ev.clientY - startY) / scale;
+      if (Math.hypot(ddx, ddy) > 0.5) onGroupDragEnd(groupId, ddx, ddy);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+  return (
+    <div ref={boxRef} style={{ position: "absolute", left: x, top: y, width: w, height: h, zIndex: 8, pointerEvents: "none" }}>
+      <div style={{ position: "absolute", inset: 0, border: "1.5px dashed #f97316", borderRadius: 4, pointerEvents: "none", boxShadow: "0 0 0 1px rgba(249,115,22,0.15)" }} />
+      <div
+        onMouseDown={handleDragStart}
+        style={{
+          position: "absolute", top: -22, left: "50%", transform: "translateX(-50%)",
+          background: "#f97316", borderRadius: 4, padding: "2px 6px",
+          cursor: "grab", zIndex: 30, display: "flex", alignItems: "center",
+          pointerEvents: "auto", boxShadow: "0 1px 4px rgba(0,0,0,0.25)", userSelect: "none",
+        }}
+      >
+        <Move style={{ width: 10, height: 10, color: "white" }} />
+      </div>
     </div>
   );
 }
@@ -785,6 +981,11 @@ interface Props {
   drawTool           : DrawTool | null;
   drawColor          : string;
   drawWidth          : number;
+  drawFill           : string | null;
+  drawOpacity        : number;
+  selectedShapeId    : string | null;
+  onSelectShape      : (id: string | null) => void;
+  onEditShape        : (shape: DrawnShape) => void;
   // Sticky notes
   stickyNotes        : StickyNote[];
   onAddNote          : (xPt: number, yPt: number) => void;
@@ -814,6 +1015,8 @@ interface Props {
   bookmarkAnchors    : Array<{ id: string; title: string; y: number }>;
   bookmarkPlaceMode  : boolean;
   onPlaceBookmark    : (xPt: number, yPt: number) => void;
+  // Page filter
+  pageFilter?        : "original" | "color" | "grayscale" | "bw" | "highcontrast";
 }
 
 // Map visual (post-rotation) coordinates back to original page coordinates
@@ -834,7 +1037,8 @@ export default function PageOverlay({
   addedImages, onEditImage, onSelectImage, onRemoveImage, selectedImageIds,
   onPlaceImage,
   showEditIndicators,
-  drawings, onAddShape, drawTool, drawColor, drawWidth,
+  drawings, onAddShape, drawTool, drawColor, drawWidth, drawFill, drawOpacity,
+  selectedShapeId, onSelectShape, onEditShape,
   stickyNotes, onAddNote, onEditNote, onRemoveNote, noteMode,
   formFields, formValues, onFormValue,
   redactMode, onRedact,
@@ -842,6 +1046,7 @@ export default function PageOverlay({
   onBoxSelect,
   links, linkMode, onLinkCreate, onLinkClick, onPageJump,
   bookmarkAnchors, bookmarkPlaceMode, onPlaceBookmark,
+  pageFilter,
 }: Props) {
   const scale         = displayWidth / page.width;
   const displayHeight = page.height * scale;
@@ -856,38 +1061,50 @@ export default function PageOverlay({
   const [rubberBand,    setRubberBand]    = useState<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
   const [linkDraft,     setLinkDraft]     = useState<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
   const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
-  const pageImgRef      = useRef<HTMLImageElement>(null);
-  const blobUrlRef      = useRef<string>("");
+  const pageImgRef       = useRef<HTMLImageElement>(null);
+  const blobUrlRef       = useRef<string>("");
   const pageContainerRef = useRef<HTMLDivElement>(null);
+  const imageLoadedRef   = useRef(false);
 
-  // Fetch the page image as a blob URL so canvas colour-sampling works without CORS.
+  // Fetch the page image only when the container enters the viewport (lazy load).
   useEffect(() => {
     let cancelled = false;
     const directUrl = `${API_BASE}${page.image_url}`;
     if (!page.image_url) return;
 
-    // Use async/await inside the effect so any caught error stays inside this
-    // async function and never surfaces as an unhandled rejection in the dev overlay.
-    const load = async () => {
-      try {
-        const r = await fetch(directUrl);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const blob = await r.blob();
+    const load = () => {
+      if (imageLoadedRef.current) return;
+      imageLoadedRef.current = true;
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", directUrl);
+      xhr.responseType = "blob";
+      xhr.onload = () => {
         if (cancelled) return;
-        const objUrl = URL.createObjectURL(blob);
-        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = objUrl;
-        setBlobSrc(objUrl);
-      } catch {
-        // Browser extension or network error — fall back to the direct URL.
-        // Canvas colour-sampling won't work but the image will still display.
-        if (!cancelled) setBlobSrc(directUrl);
-      }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const objUrl = URL.createObjectURL(xhr.response as Blob);
+          if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+          blobUrlRef.current = objUrl;
+          setBlobSrc(objUrl);
+        } else {
+          setBlobSrc(directUrl);
+        }
+      };
+      xhr.onerror = () => { if (!cancelled) setBlobSrc(directUrl); };
+      xhr.send();
     };
-    load();
+
+    const el = pageContainerRef.current;
+    if (!el) { load(); return; }
+
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting) { observer.disconnect(); load(); } },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
 
     return () => {
       cancelled = true;
+      observer.disconnect();
       if (blobUrlRef.current) { URL.revokeObjectURL(blobUrlRef.current); blobUrlRef.current = ""; }
     };
   }, [page.image_url]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1125,6 +1342,7 @@ export default function PageOverlay({
             else if (bookmarkPlaceMode){ onPlaceBookmark(ox, oy); }
             else if (noteMode)         { onAddNote(ox, oy); }
             else if (onPlaceImage)     { onPlaceImage(ox, oy); }
+            else                       { onSelectShape(null); }
           }}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1134,7 +1352,14 @@ export default function PageOverlay({
             alt={`Page ${page.page_num + 1}`}
             draggable={false}
             onLoad={sampleCoverColors}
-            style={{ width: "100%", height: "100%", display: "block" }}
+            style={{
+              width: "100%", height: "100%", display: "block",
+              filter: pageFilter === "grayscale"    ? "grayscale(100%)"
+                    : pageFilter === "bw"           ? "grayscale(100%) contrast(200%)"
+                    : pageFilter === "highcontrast" ? "contrast(200%) brightness(85%)"
+                    : pageFilter === "color"        ? "saturate(150%) brightness(1.05)"
+                    : "none",
+            }}
           />
 
           {/* Cover rectangles for edited/deleted/redacted words */}
@@ -1196,16 +1421,12 @@ export default function PageOverlay({
           })}
 
           {/* Snap guides */}
-          <div ref={hGuideRef} style={{ display: "none", position: "absolute", left: 0, right: 0, height: 1, background: "#a78bfa", pointerEvents: "none", zIndex: 50, boxShadow: "0 0 3px rgba(167,139,250,0.8)" }} />
-          <div ref={vGuideRef} style={{ display: "none", position: "absolute", top: 0, bottom: 0, width: 1, background: "#a78bfa", pointerEvents: "none", zIndex: 50, boxShadow: "0 0 3px rgba(167,139,250,0.8)" }} />
+          <div ref={hGuideRef} style={{ display: "none", position: "absolute", left: 0, right: 0, height: 1, background: "#f97316", pointerEvents: "none", zIndex: 50, boxShadow: "0 0 3px rgba(249,115,22,0.8)" }} />
+          <div ref={vGuideRef} style={{ display: "none", position: "absolute", top: 0, bottom: 0, width: 1, background: "#f97316", pointerEvents: "none", zIndex: 50, boxShadow: "0 0 3px rgba(249,115,22,0.8)" }} />
 
           {/* Group bounding boxes */}
           {groupBoxes.map(({ groupId, x, y, w, h }) => (
-            <div key={groupId} style={{
-              position: "absolute", left: x, top: y, width: w, height: h,
-              border: "1.5px dashed #8b5cf6", borderRadius: 4, pointerEvents: "none", zIndex: 8,
-              boxShadow: "0 0 0 1px rgba(139,92,246,0.15)",
-            }} />
+            <GroupBox key={groupId} groupId={groupId} x={x} y={y} w={w} h={h} scale={scale} onGroupDragEnd={onGroupDragEnd} />
           ))}
 
           {/* Drawing shapes */}
@@ -1215,7 +1436,12 @@ export default function PageOverlay({
             drawTool={drawTool}
             drawColor={drawColor}
             drawWidth={drawWidth}
+            drawFill={drawFill}
+            drawOpacity={drawOpacity}
             onAdd={onAddShape}
+            selectedShapeId={selectedShapeId}
+            onSelectShape={onSelectShape}
+            onEditShape={onEditShape}
           />
 
           {/* Form fields */}
@@ -1358,7 +1584,7 @@ export default function PageOverlay({
             return (
               <div style={{
                 position: "absolute", left: x, top: y, width: w, height: h,
-                border: "1.5px solid #8b5cf6", background: "rgba(139,92,246,0.08)",
+                border: "1.5px solid #f97316", background: "rgba(249,115,22,0.08)",
                 pointerEvents: "none", zIndex: 200,
               }} />
             );

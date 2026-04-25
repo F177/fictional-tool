@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Download, FileText, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -9,10 +9,12 @@ import PageThumbnailSidebar from "./PageThumbnailSidebar";
 import Ruler, { RULER_SIZE } from "./Ruler";
 import HistoryPanel from "./HistoryPanel";
 import LayersPanel from "./LayersPanel";
+import InlineFormatBar from "./InlineFormatBar";
 import Toolbar, { ZOOM_STEPS, type ActiveFormat } from "./Toolbar";
 import FindReplace from "./FindReplace";
 import { uploadPdf, waitForJob, fetchOutline, type ApiPage, type WordEdit, type AddedWordItem, type AddedImageItem, type CellRef, type FormatPatch, type DrawnShape, type DrawTool, type StickyNote, type GroupDef, type LinkAnnotation, type BookmarkEntry } from "@/lib/api";
 import SignatureDialog from "./SignatureDialog";
+import ShapeFormatBar from "./ShapeFormatBar";
 import BookmarksPanel from "./BookmarksPanel";
 import LinkDialog from "./LinkDialog";
 import WatermarkDialog, { type WatermarkConfig } from "./WatermarkDialog";
@@ -83,7 +85,8 @@ type PrimitiveAction =
   | { type: "dissolveGroup"; groupId: string }
   | { type: "addLink";    pageIdx: number; link: LinkAnnotation }
   | { type: "editLink";   pageIdx: number; id: string; link: LinkAnnotation }
-  | { type: "removeLink"; pageIdx: number; id: string };
+  | { type: "removeLink"; pageIdx: number; id: string }
+  | { type: "editShape";  pageIdx: number; id: string; shape: DrawnShape };
 
 type HistoryAction =
   | PrimitiveAction
@@ -143,6 +146,10 @@ function applySubAction(current: Snapshot, action: PrimitiveAction): Snapshot {
       return { ...current, links: { ...current.links, [action.pageIdx]: (current.links[action.pageIdx] ?? []).map(l => l.id === action.id ? action.link : l) } };
     case "removeLink":
       return { ...current, links: { ...current.links, [action.pageIdx]: (current.links[action.pageIdx] ?? []).filter(l => l.id !== action.id) } };
+    case "editShape": {
+      const existing = current.drawings[action.pageIdx] ?? [];
+      return { ...current, drawings: { ...current.drawings, [action.pageIdx]: existing.map(s => s.id === action.id ? action.shape : s) } };
+    }
   }
 }
 
@@ -172,6 +179,7 @@ function getMeta(action: PrimitiveAction): HistoryMeta {
     case "addLink":       return { label: `Added link — page ${p}`,   iconType: "addText",  timestamp: ts };
     case "editLink":      return { label: `Edited link — page ${p}`,  iconType: "text",     timestamp: ts };
     case "removeLink":    return { label: `Removed link — page ${p}`, iconType: "deleteText", timestamp: ts };
+    case "editShape":     return { label: `Edited shape — page ${p}`,  iconType: "image",      timestamp: ts };
   }
 }
 
@@ -243,6 +251,8 @@ export default function EditorClient() {
   const [errorMsg, setErrorMsg]   = useState("");
   const [downloading, setDownloading] = useState(false);
   const [zoom, setZoom]           = useState(1);
+  const [floatingBarPos, setFloatingBarPos] = useState<{ x: number; y: number } | null>(null);
+  const clipboardRef = useRef<Array<{ added?: AddedWordItem; image?: AddedImageItem; pageIdx: number }>>([]);
   const [selectedCells, setSelectedCells] = useState<CellRef[]>([]);
   const [addTextMode, setAddTextMode]     = useState(false);
   const [sidebarOpen, setSidebarOpen]     = useState(true);
@@ -252,9 +262,16 @@ export default function EditorClient() {
   const [historyOpen,        setHistoryOpen]        = useState(false);
   const [layersOpen,         setLayersOpen]         = useState(false);
   const [showEditIndicators, setShowEditIndicators] = useState(false);
-  const [drawTool,   setDrawTool]   = useState<DrawTool | null>(null);
-  const [drawColor,  setDrawColor]  = useState("#ef4444");
-  const [drawWidth,  setDrawWidth]  = useState(2);
+  const [drawTool,    setDrawTool]    = useState<DrawTool | null>(null);
+  const [drawColor,   setDrawColor]   = useState("#ef4444");
+  const [drawWidth,   setDrawWidth]   = useState(2);
+  const [drawFill,    setDrawFill]    = useState<string | null>(null);
+  const [drawOpacity, setDrawOpacity] = useState(1);
+  const [pageFilter,  setPageFilter]  = useState<"original" | "color" | "grayscale" | "bw" | "highcontrast">("original");
+  const [darkMode,    setDarkMode]    = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("thepdf-dark") === "1" || document.documentElement.classList.contains("dark");
+  });
   const [redactMode, setRedactMode] = useState(false);
   const [noteMode,   setNoteMode]   = useState(false);
   const [watermark,       setWatermark]       = useState<WatermarkConfig | null>(null);
@@ -271,6 +288,9 @@ export default function EditorClient() {
     id?    : string;
     x      : number; y: number; w: number; h: number;
   } | null>(null);
+  const [selectedShapeId, setSelectedShapeId] = useState<{ pageIdx: number; id: string } | null>(null);
+  const selectedShapeIdRef = useRef<{ pageIdx: number; id: string } | null>(null);
+  const [shapeBarPos, setShapeBarPos] = useState<{ x: number; y: number } | null>(null);
 
   const imageFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -302,6 +322,7 @@ export default function EditorClient() {
   const addedImagesRef   = useRef(addedImages);
   const selectedCellsRef = useRef(selectedCells);
   const groupsRef        = useRef(groups);
+  const rulerRafRef      = useRef<number>(0);
   const activeFormatRef  = useRef<ActiveFormat | null>(null);
   const currentPageRef   = useRef(0);
   const zoomRef          = useRef(zoom);
@@ -319,10 +340,50 @@ export default function EditorClient() {
   useEffect(() => { pageOrderRef.current = pageOrder; },         [pageOrder]);
   useEffect(() => { bookmarksRef.current = bookmarks; },         [bookmarks]);
   useEffect(() => { linksRef.current = links; },                 [links]);
+  useEffect(() => { selectedShapeIdRef.current = selectedShapeId; }, [selectedShapeId]);
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode);
+    localStorage.setItem("thepdf-dark", darkMode ? "1" : "0");
+  }, [darkMode]);
 
   const mainScrollRef = useRef<HTMLElement>(null);
 
-  // ── Page tracking (IntersectionObserver) ──────────────────────────────────
+  // Smooth Ctrl+wheel zoom — attach to window so it always fires even before pages load.
+  // Zoom anchors to cursor position so content under cursor stays stationary.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      const main = mainScrollRef.current;
+      if (!main) return;
+      // Only intercept when cursor is over the PDF scroll area.
+      const rect = main.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
+      e.preventDefault();
+      const factor = Math.pow(1.001, -e.deltaY);
+      // Capture cursor position relative to scroll content before zoom.
+      const cursorX = e.clientX - rect.left + main.scrollLeft;
+      const cursorY = e.clientY - rect.top  + main.scrollTop;
+      setZoom(z => {
+        const newZ = Math.max(0.25, Math.min(4, z * factor));
+        // After React re-renders with new zoom, adjust scroll so cursor point is stationary.
+        requestAnimationFrame(() => {
+          const m = mainScrollRef.current;
+          if (!m) return;
+          m.scrollLeft = cursorX * (newZ / z) - (e.clientX - rect.left);
+          m.scrollTop  = cursorY * (newZ / z) - (e.clientY - rect.top);
+        });
+        return newZ;
+      });
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, []);
+
+
+  // ── Page tracking + virtualization window ────────────────────────────────
+
+  const VIRT_BUFFER = 2; // render this many pages above/below the visible one
+  const [visibleRange, setVisibleRange] = useState<[number, number]>([0, VIRT_BUFFER * 2]);
 
   useEffect(() => {
     if (pages.length === 0) return;
@@ -338,6 +399,10 @@ export default function EditorClient() {
           }
         }
         setCurrentPage(bestIdx);
+        setVisibleRange([
+          Math.max(0, bestIdx - VIRT_BUFFER),
+          Math.min(pages.length - 1, bestIdx + VIRT_BUFFER),
+        ]);
       },
       { root: mainScrollRef.current, threshold: Array.from({ length: 11 }, (_, k) => k * 0.1) },
     );
@@ -393,6 +458,22 @@ export default function EditorClient() {
     reader.readAsDataURL(file);
   }, []);
 
+  // ── File drag-drop ────────────────────────────────────────────────────────
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if ([...e.dataTransfer.types].includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (file.type.startsWith("image/")) handleInsertImageFile(file);
+  }, [handleInsertImageFile]);
+
   // ── Find matches ───────────────────────────────────────────────────────────
 
   const findMatches = useMemo(() => {
@@ -414,6 +495,17 @@ export default function EditorClient() {
 
   // Reset match index when query changes
   useEffect(() => { setFindMatchIdx(0); }, [findQuery]);
+
+  // Auto-scroll to the page containing the current search match
+  useEffect(() => {
+    if (findMatches.length === 0 || !findOpen) return;
+    const idx   = Math.min(findMatchIdx, findMatches.length - 1);
+    const match = findMatches[idx];
+    if (!match) return;
+    const displayIdx = pageOrderRef.current.indexOf(match.pageIdx);
+    if (displayIdx < 0) return;
+    document.getElementById(`page-${displayIdx}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [findMatchIdx, findMatches, findOpen]);
 
   const findHighlightsByPage = useMemo(() => {
     const result: Record<number, Set<number>> = {};
@@ -444,6 +536,7 @@ export default function EditorClient() {
         strikethrough: edit?.strikethrough ?? false,
         highlight:     edit?.highlight     ?? null,
         textAlign:     "left",
+        rotation:      0,
         isAddedWord:   false,
       };
     } else if (last.kind === "added") {
@@ -460,6 +553,9 @@ export default function EditorClient() {
         strikethrough: item.strikethrough ?? false,
         highlight:     null,
         textAlign:     item.textAlign     ?? "left",
+        rotation:      item.rotation      ?? 0,
+        lineHeight:    item.lineHeight    ?? 1.3,
+        listType:      item.listType      ?? "none",
         isAddedWord:   true,
       };
     } else {
@@ -469,6 +565,51 @@ export default function EditorClient() {
   }, [selectedCells, pages, edits, added]);
 
   useEffect(() => { activeFormatRef.current = activeFormat; }, [activeFormat]);
+
+  // Floating inline toolbar — recompute after selection changes (must be after activeFormat declaration)
+  useLayoutEffect(() => {
+    if (selectedCells.length === 0 || !activeFormat) { setFloatingBarPos(null); return; }
+    const id = requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>("[data-inline-selected]");
+      if (!el) { setFloatingBarPos(null); return; }
+      const rect = el.getBoundingClientRect();
+      setFloatingBarPos({ x: rect.left + rect.width / 2, y: Math.max(60, rect.top - 2) });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [selectedCells, activeFormat]);
+
+  // Shape format bar — recompute position when selected shape changes
+  useLayoutEffect(() => {
+    if (!selectedShapeId) { setShapeBarPos(null); return; }
+    const id = requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>("[data-shape-anchor]");
+      if (!el) { setShapeBarPos(null); return; }
+      const rect = el.getBoundingClientRect();
+      setShapeBarPos({ x: rect.left, y: Math.max(60, rect.top - 2) });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [selectedShapeId, drawings]);
+
+  // ── Selection maps (must be before early returns — Rules of Hooks) ─────────
+  const { selWordsByPage, selAddedByPage, selImagesByPage } = useMemo(() => {
+    const words  = new Map<number, Set<number>>();
+    const addedM = new Map<number, Set<string>>();
+    const images = new Map<number, Set<string>>();
+    for (const cell of selectedCells) {
+      if (cell.kind === "word") {
+        if (!words.has(cell.pageIdx))  words.set(cell.pageIdx,  new Set());
+        words.get(cell.pageIdx)!.add(cell.wordIdx);
+      } else if (cell.kind === "added") {
+        if (!addedM.has(cell.pageIdx))  addedM.set(cell.pageIdx,  new Set());
+        addedM.get(cell.pageIdx)!.add(cell.id);
+      } else {
+        if (!images.has(cell.pageIdx)) images.set(cell.pageIdx, new Set());
+        images.get(cell.pageIdx)!.add(cell.id);
+      }
+    }
+    return { selWordsByPage: words, selAddedByPage: addedM, selImagesByPage: images };
+  }, [selectedCells]);
+  const deletedSet = useMemo(() => new Set(deletedPages), [deletedPages]);
 
   // ── Group helpers ──────────────────────────────────────────────────────────
 
@@ -576,6 +717,9 @@ export default function EditorClient() {
             underline:     patch.underline     !== undefined ? patch.underline     : item.underline,
             strikethrough: patch.strikethrough !== undefined ? patch.strikethrough : item.strikethrough,
             textAlign:     patch.textAlign     !== undefined ? patch.textAlign     : item.textAlign,
+            rotation:      patch.rotation      !== undefined ? patch.rotation      : item.rotation,
+            lineHeight:    patch.lineHeight    !== undefined ? patch.lineHeight    : item.lineHeight,
+            listType:      patch.listType      !== undefined ? patch.listType      : item.listType,
           },
         });
       }
@@ -877,20 +1021,106 @@ export default function EditorClient() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey;
+      const activeEl = document.activeElement as HTMLElement | null;
+      const tag = activeEl?.tagName ?? "";
+      // A text-type input where text can be selected (not color/range/checkbox)
+      const inTextInput = tag === "INPUT" &&
+        ["text", "number", "search", "email", "url"].includes((activeEl as HTMLInputElement).type ?? "text");
+      const inTextarea  = tag === "TEXTAREA";
+      // Context where native text editing should take priority over element shortcuts
+      const inEditCtx   = inTextInput || inTextarea;
+      // True only when the user has text highlighted in the focused element
+      const hasTextSel  = inEditCtx && (() => {
+        const el = activeEl as HTMLInputElement | HTMLTextAreaElement;
+        return (el.selectionStart ?? 0) !== (el.selectionEnd ?? 0);
+      })();
+
       if (ctrl && e.key === "z" && !e.shiftKey) { e.preventDefault(); dispatch({ type: "undo" }); }
       if (ctrl && (e.key === "y" || (e.key === "z" && e.shiftKey))) { e.preventDefault(); dispatch({ type: "redo" }); }
-      if (ctrl && (e.key === "=" || e.key === "+")) { e.preventDefault(); setZoom(z => ZOOM_STEPS.find(s => s > z) ?? z); }
-      if (ctrl && e.key === "-") { e.preventDefault(); setZoom(z => [...ZOOM_STEPS].reverse().find(s => s < z) ?? z); }
+      if (ctrl && (e.key === "=" || e.key === "+")) { e.preventDefault(); setZoom(z => Math.min(4, z * 1.15)); }
+      if (ctrl && e.key === "-") { e.preventDefault(); setZoom(z => Math.max(0.25, z / 1.15)); }
       if (ctrl && e.key === "0") { e.preventDefault(); setZoom(1); }
-      if (ctrl && e.key === "h" && !e.shiftKey) { e.preventDefault(); setFindOpen(o => !o); }
+      if (ctrl && e.key === "h" && !e.shiftKey && !inEditCtx) { e.preventDefault(); setFindOpen(o => !o); }
       if (ctrl && e.shiftKey && e.key === "H") { e.preventDefault(); setHistoryOpen(o => !o); }
-      if (ctrl && e.key === "g" && !e.shiftKey) { e.preventDefault(); handleGroup(); }
-      if (ctrl && e.shiftKey && e.key === "G") { e.preventDefault(); handleUngroup(); }
-      if (ctrl && e.key === "k") { e.preventDefault(); clearAllModes(); setLinkMode(m => !m); }
-      if (e.key === "Escape") { clearAllModes(); setFindOpen(false); }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedCellsRef.current.length > 0) {
-        const active = document.activeElement;
-        if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
+      if (ctrl && e.key === "g" && !e.shiftKey && !inEditCtx) { e.preventDefault(); handleGroup(); }
+      if (ctrl && e.shiftKey && e.key === "G" && !inEditCtx) { e.preventDefault(); handleUngroup(); }
+      if (ctrl && e.key === "k" && !inEditCtx) { e.preventDefault(); clearAllModes(); setLinkMode(m => !m); }
+      if (e.key === "Escape") { clearAllModes(); setFindOpen(false); setSelectedCells([]); setSelectedShapeId(null); }
+
+      // Ctrl+A — select all added elements (blocked when actively editing text)
+      if (ctrl && e.key === "a" && !inEditCtx) {
+        e.preventDefault();
+        const allCells: CellRef[] = [];
+        for (const origIdx of pageOrderRef.current) {
+          for (const item of (addedRef.current[origIdx] ?? []))
+            allCells.push({ kind: "added", pageIdx: origIdx, id: item.id });
+          for (const img of (addedImagesRef.current[origIdx] ?? []))
+            allCells.push({ kind: "image", pageIdx: origIdx, id: img.id });
+        }
+        setSelectedCells(allCells);
+      }
+
+      // Ctrl+C — copy selected elements (added words, images, or original PDF words).
+      // Not blocked by SELECT/color/range focus — only blocked when text is highlighted in an input.
+      if (ctrl && e.key === "c" && !hasTextSel && selectedCellsRef.current.length > 0) {
+        e.preventDefault();
+        const copied: typeof clipboardRef.current = [];
+        for (const cell of selectedCellsRef.current) {
+          if (cell.kind === "added") {
+            const item = (addedRef.current[cell.pageIdx] ?? []).find(w => w.id === cell.id);
+            if (item) copied.push({ added: item, pageIdx: cell.pageIdx });
+          } else if (cell.kind === "image") {
+            const img = (addedImagesRef.current[cell.pageIdx] ?? []).find(i => i.id === cell.id);
+            if (img) copied.push({ image: img, pageIdx: cell.pageIdx });
+          } else if (cell.kind === "word") {
+            // Convert original PDF word to an AddedWordItem so it can be pasted/moved freely
+            const page = pagesRef.current[cell.pageIdx];
+            const word = page?.words[cell.wordIdx];
+            if (!word) continue;
+            const edit = editsRef.current[cell.pageIdx]?.[cell.wordIdx];
+            const asAdded: AddedWordItem = {
+              id        : nanoid(),
+              x         : word.box[0] + (edit?.dx ?? 0),
+              y         : (word.baseline_y ?? word.box[3]) + (edit?.dy ?? 0),
+              text      : edit?.text ?? word.text,
+              fontSize  : edit?.fontSize ?? word.font_size,
+              fontFamily: edit?.fontFamily ?? word.font_family ?? "Arial, sans-serif",
+              bold      : edit?.bold      ?? word.bold      ?? false,
+              italic    : edit?.italic    ?? word.italic    ?? false,
+              underline : edit?.underline ?? false,
+              strikethrough: edit?.strikethrough ?? false,
+              color     : edit?.color ?? word.color ?? 0,
+            };
+            copied.push({ added: asAdded, pageIdx: cell.pageIdx });
+          }
+        }
+        clipboardRef.current = copied;
+      }
+
+      // Ctrl+V — paste elements (only blocked when actively typing in a text editor)
+      if (ctrl && e.key === "v" && !inEditCtx) {
+        const items = clipboardRef.current;
+        if (items.length === 0) return;
+        e.preventDefault();
+        const targetPage = pageOrderRef.current[currentPageRef.current] ?? 0;
+        const subActions: PrimitiveAction[] = [];
+        for (const entry of items) {
+          if (entry.added)
+            subActions.push({ type: "addWord", pageIdx: targetPage, word: { ...entry.added, id: nanoid(), x: entry.added.x + 15, y: entry.added.y + 15 } });
+          else if (entry.image)
+            subActions.push({ type: "addImage", pageIdx: targetPage, img: { ...entry.image, id: nanoid(), x: (entry.image.x ?? 0) + 15, y: (entry.image.y ?? 0) + 15 } });
+        }
+        if (subActions.length > 0) dispatch({ type: "batch", label: "Paste", iconType: "addText", subActions });
+      }
+
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedShapeIdRef.current && !inEditCtx) {
+        e.preventDefault();
+        dispatch({ type: "removeShape", pageIdx: selectedShapeIdRef.current.pageIdx, id: selectedShapeIdRef.current.id });
+        setSelectedShapeId(null);
+        return;
+      }
+
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedCellsRef.current.length > 0 && !inEditCtx) {
         e.preventDefault();
         handleDeleteSelected();
       }
@@ -999,23 +1229,6 @@ export default function EditorClient() {
   const displayWidth = baseWidth * zoom;
   const rulerScale   = pages.length > 0 ? displayWidth / pages[0].width : 1;
 
-  // Per-page selection sets
-  const selWordsByPage  = new Map<number, Set<number>>();
-  const selAddedByPage  = new Map<number, Set<string>>();
-  const selImagesByPage = new Map<number, Set<string>>();
-  const deletedSet      = new Set(deletedPages);
-  for (const cell of selectedCells) {
-    if (cell.kind === "word") {
-      if (!selWordsByPage.has(cell.pageIdx))  selWordsByPage.set(cell.pageIdx,  new Set());
-      selWordsByPage.get(cell.pageIdx)!.add(cell.wordIdx);
-    } else if (cell.kind === "added") {
-      if (!selAddedByPage.has(cell.pageIdx))  selAddedByPage.set(cell.pageIdx,  new Set());
-      selAddedByPage.get(cell.pageIdx)!.add(cell.id);
-    } else {
-      if (!selImagesByPage.has(cell.pageIdx)) selImagesByPage.set(cell.pageIdx, new Set());
-      selImagesByPage.get(cell.pageIdx)!.add(cell.id);
-    }
-  }
 
   // Group button states
   const selectedGroup = groups.find(g =>
@@ -1080,6 +1293,10 @@ export default function EditorClient() {
         onDrawColorChange={setDrawColor}
         drawWidth={drawWidth}
         onDrawWidthChange={setDrawWidth}
+        drawFill={drawFill}
+        onDrawFillChange={setDrawFill}
+        drawOpacity={drawOpacity}
+        onDrawOpacityChange={setDrawOpacity}
         redactMode={redactMode}
         onRedactToggle={handleRedactToggle}
         noteMode={noteMode}
@@ -1096,6 +1313,10 @@ export default function EditorClient() {
         onLinkToggle={() => { clearAllModes(); setLinkMode(m => !m); }}
         bookmarksOpen={bookmarksOpen}
         onBookmarksToggle={() => setBookmarksOpen(o => !o)}
+        darkMode={darkMode}
+        onDarkModeToggle={() => setDarkMode(d => !d)}
+        pageFilter={pageFilter}
+        onPageFilterChange={setPageFilter}
       />
 
       {/* Middle: sidebar + ruler area + scroll area */}
@@ -1134,9 +1355,16 @@ export default function EditorClient() {
         <main
           ref={mainScrollRef as React.RefObject<HTMLDivElement>}
           className="flex-1 overflow-auto bg-zinc-200 dark:bg-zinc-800"
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
           onMouseMove={(e) => {
+            if (rulerRafRef.current) return;
+            const cx = e.clientX, cy = e.clientY;
             const rect = e.currentTarget.getBoundingClientRect();
-            setRulerCursor({ x: (e.clientX - rect.left) / rulerScale, y: (e.clientY - rect.top) / rulerScale });
+            rulerRafRef.current = requestAnimationFrame(() => {
+              rulerRafRef.current = 0;
+              setRulerCursor({ x: (cx - rect.left) / rulerScale, y: (cy - rect.top) / rulerScale });
+            });
           }}
           onMouseLeave={() => setRulerCursor(undefined)}
         >
@@ -1144,6 +1372,14 @@ export default function EditorClient() {
             {pageOrder.map((origIdx, displayIdx) => {
               const page = pages[origIdx];
               if (!page || deletedSet.has(origIdx)) return null;
+              const inWindow = displayIdx >= visibleRange[0] && displayIdx <= visibleRange[1];
+              const placeholderH = Math.round(page.height * displayWidth / page.width);
+              if (!inWindow) {
+                return (
+                  <div key={origIdx} id={`page-${displayIdx}`} data-page-idx={displayIdx}
+                    style={{ width: displayWidth, height: placeholderH, background: "#fff", borderRadius: 2 }} />
+                );
+              }
               return (
                 <div key={origIdx} id={`page-${displayIdx}`} data-page-idx={displayIdx}>
                   <PageOverlay
@@ -1180,6 +1416,11 @@ export default function EditorClient() {
                     drawTool={drawTool}
                     drawColor={drawColor}
                     drawWidth={drawWidth}
+                    drawFill={drawFill}
+                    drawOpacity={drawOpacity}
+                    selectedShapeId={selectedShapeId?.pageIdx === origIdx ? selectedShapeId.id : null}
+                    onSelectShape={(id) => setSelectedShapeId(id ? { pageIdx: origIdx, id } : null)}
+                    onEditShape={(shape) => dispatch({ type: "editShape", pageIdx: origIdx, id: shape.id, shape })}
                     stickyNotes={stickyNotes[origIdx] ?? []}
                     onAddNote={(xPt, yPt) => handleAddNote(origIdx, xPt, yPt)}
                     onEditNote={(id, note) => dispatch({ type: "editNote", pageIdx: origIdx, id, note })}
@@ -1204,6 +1445,7 @@ export default function EditorClient() {
                       .map(b => ({ id: b.id, title: b.title, y: b.y! }))}
                     bookmarkPlaceMode={bookmarkPlaceMode}
                     onPlaceBookmark={(xPt, yPt) => handlePlaceBookmark(origIdx, xPt, yPt)}
+                    pageFilter={pageFilter}
                   />
                 </div>
               );
@@ -1387,6 +1629,35 @@ export default function EditorClient() {
           e.target.value = "";
         }}
       />
+
+      {/* Inline floating format bar */}
+      {floatingBarPos && activeFormat && selectedCells.length > 0 && (
+        <InlineFormatBar
+          x={floatingBarPos.x}
+          y={floatingBarPos.y}
+          activeFormat={activeFormat}
+          onFormatChange={applyFormat}
+          onDelete={handleDeleteSelected}
+        />
+      )}
+
+      {/* Shape format bar */}
+      {shapeBarPos && selectedShapeId && (() => {
+        const shape = (drawings[selectedShapeId.pageIdx] ?? []).find(s => s.id === selectedShapeId.id);
+        if (!shape) return null;
+        return (
+          <ShapeFormatBar
+            x={shapeBarPos.x}
+            y={shapeBarPos.y}
+            shape={shape}
+            onEdit={(s) => dispatch({ type: "editShape", pageIdx: selectedShapeId.pageIdx, id: s.id, shape: s })}
+            onDelete={() => {
+              dispatch({ type: "removeShape", pageIdx: selectedShapeId.pageIdx, id: selectedShapeId.id });
+              setSelectedShapeId(null);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

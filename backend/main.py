@@ -376,18 +376,51 @@ async def export_pdf(req: ExportRequest):
             elif tool == "circle":
                 x, y, w, h = float(shape.get("x", 0)), float(shape.get("y", 0)), float(shape.get("w", 0)), float(shape.get("h", 0))
                 page.draw_oval(fitz.Rect(x, y, x + w, y + h), color=color, fill=fill_color, width=lw)
+            elif tool == "line":
+                x1, y1 = float(shape.get("x1", 0)), float(shape.get("y1", 0))
+                x2, y2 = float(shape.get("x2", 0)), float(shape.get("y2", 0))
+                page.draw_line(fitz.Point(x1, y1), fitz.Point(x2, y2), color=color, width=lw)
             elif tool == "arrow":
                 x1, y1 = float(shape.get("x1", 0)), float(shape.get("y1", 0))
                 x2, y2 = float(shape.get("x2", 0)), float(shape.get("y2", 0))
                 page.draw_line(fitz.Point(x1, y1), fitz.Point(x2, y2), color=color, width=lw)
                 angle = _math.atan2(y2 - y1, x2 - x1)
-                al, aw = lw * 4, 0.45
+                al, aw = max(lw * 3.5, 8), 0.45
                 ah1 = fitz.Point(x2 - al * _math.cos(angle - aw), y2 - al * _math.sin(angle - aw))
                 ah2 = fitz.Point(x2 - al * _math.cos(angle + aw), y2 - al * _math.sin(angle + aw))
                 sh2 = page.new_shape()
                 sh2.draw_polyline([fitz.Point(x2, y2), ah1, ah2, fitz.Point(x2, y2)])
                 sh2.finish(color=color, fill=color, width=0)
                 sh2.commit()
+            elif tool == "triangle":
+                x, y, w, h = float(shape.get("x", 0)), float(shape.get("y", 0)), float(shape.get("w", 0)), float(shape.get("h", 0))
+                pts = [fitz.Point(x + w / 2, y), fitz.Point(x, y + h), fitz.Point(x + w, y + h), fitz.Point(x + w / 2, y)]
+                sh = page.new_shape()
+                sh.draw_polyline(pts)
+                sh.finish(color=color, fill=fill_color, width=lw, closePath=True)
+                sh.commit()
+            elif tool == "diamond":
+                x, y, w, h = float(shape.get("x", 0)), float(shape.get("y", 0)), float(shape.get("w", 0)), float(shape.get("h", 0))
+                pts = [fitz.Point(x + w / 2, y), fitz.Point(x + w, y + h / 2), fitz.Point(x + w / 2, y + h), fitz.Point(x, y + h / 2), fitz.Point(x + w / 2, y)]
+                sh = page.new_shape()
+                sh.draw_polyline(pts)
+                sh.finish(color=color, fill=fill_color, width=lw, closePath=True)
+                sh.commit()
+            elif tool == "star":
+                x, y, w, h = float(shape.get("x", 0)), float(shape.get("y", 0)), float(shape.get("w", 0)), float(shape.get("h", 0))
+                cx, cy = x + w / 2, y + h / 2
+                outer_r = min(abs(w), abs(h)) / 2
+                inner_r = outer_r * 0.4
+                star_pts = []
+                for i in range(10):
+                    angle = (_math.pi / 5) * i - _math.pi / 2
+                    r = outer_r if i % 2 == 0 else inner_r
+                    star_pts.append(fitz.Point(cx + r * _math.cos(angle), cy + r * _math.sin(angle)))
+                star_pts.append(star_pts[0])
+                sh = page.new_shape()
+                sh.draw_polyline(star_pts)
+                sh.finish(color=color, fill=fill_color, width=lw, closePath=True)
+                sh.commit()
         except Exception:
             pass
 
@@ -523,31 +556,23 @@ async def export_pdf(req: ExportRequest):
         doc.select(final_order)
 
     # ── Bookmarks / Outline (MUST be after doc.select — select() rebuilds page tree) ──
-    print(f"[DIAG bookmarks] received {len(req.bookmarks)} bookmark(s): {req.bookmarks}", flush=True)
-    print(f"[DIAG bookmarks] final_order={final_order}", flush=True)
     if req.bookmarks:
         toc = []
         for bm in req.bookmarks:
             orig_page_idx = int(bm.get("pageIdx", 0))
             if orig_page_idx not in final_order:
-                print(f"[DIAG bookmarks] SKIP bm={bm} — orig_page_idx={orig_page_idx} not in final_order", flush=True)
                 continue
             new_page_no = final_order.index(orig_page_idx) + 1
             level = int(bm.get("level", 0)) + 1
             title = str(bm.get("title", ""))
             y     = bm.get("y")
             entry = [level, title, new_page_no, float(y)] if y is not None else [level, title, new_page_no]
-            print(f"[DIAG bookmarks] toc entry: {entry}", flush=True)
             toc.append(entry)
-        print(f"[DIAG bookmarks] calling set_toc with {len(toc)} entries", flush=True)
         if toc:
             try:
                 doc.set_toc(toc)
-                print(f"[DIAG bookmarks] set_toc OK, verify get_toc={doc.get_toc()}", flush=True)
-            except Exception as e:
-                print(f"[DIAG bookmarks] set_toc FAILED: {e}", flush=True)
-    else:
-        print("[DIAG bookmarks] req.bookmarks is empty — nothing to write", flush=True)
+            except Exception:
+                pass
 
     # ── Compress + encryption ─────────────────────────────────────────────────
     save_kwargs: dict = {"garbage": 4, "deflate": True}
@@ -583,4 +608,5 @@ async def get_page_image(file_hash: str, page_num: int):
     img_path = PAGES_DIR / file_hash / f"{page_num}.png"
     if not img_path.exists():
         raise HTTPException(404, "Page image not found")
-    return FileResponse(str(img_path), media_type="image/png")
+    return FileResponse(str(img_path), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400, immutable"})
