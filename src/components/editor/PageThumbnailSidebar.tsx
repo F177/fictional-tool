@@ -1,24 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Trash2, RotateCcw, GripVertical } from "lucide-react";
+import { Trash2, RotateCcw, GripVertical, Plus, Copy } from "lucide-react";
 import { API_BASE, type ApiPage } from "@/lib/api";
 
 interface Props {
-  pages        : ApiPage[];
-  pageOrder    : number[];
-  currentPage  : number;
-  rotations    : Record<number, number>;
-  deletedPages : number[];
-  onPageClick  : (displayIdx: number) => void;
-  onDeletePage : (origIdx: number) => void;
-  onRestorePage: (origIdx: number) => void;
-  onReorder    : (newOrder: number[]) => void;
+  pages          : ApiPage[];
+  pageOrder      : number[];
+  currentPage    : number;
+  rotations      : Record<number, number>;
+  deletedPages   : number[];
+  onPageClick    : (displayIdx: number) => void;
+  onDeletePage   : (origIdx: number) => void;
+  onRestorePage  : (origIdx: number) => void;
+  onReorder      : (newOrder: number[]) => void;
+  onAddBlankPage?  : (afterDisplayIdx: number) => void;
+  onDuplicatePage? : (afterDisplayIdx: number) => void;
 }
 
 export default function PageThumbnailSidebar({
   pages, pageOrder, currentPage, rotations, deletedPages,
-  onPageClick, onDeletePage, onRestorePage, onReorder,
+  onPageClick, onDeletePage, onRestorePage, onReorder, onAddBlankPage, onDuplicatePage,
 }: Props) {
   const thumbRefs  = useRef<(HTMLDivElement | null)[]>([]);
   const deletedSet = new Set(deletedPages);
@@ -77,6 +79,8 @@ export default function PageThumbnailSidebar({
             onClick={() => !isDeleted && onPageClick(displayIdx)}
             onDelete={() => onDeletePage(origIdx)}
             onRestore={() => onRestorePage(origIdx)}
+            onAddAfter={onAddBlankPage ? () => onAddBlankPage(displayIdx) : undefined}
+            onDuplicate={onDuplicatePage ? () => onDuplicatePage(displayIdx) : undefined}
             draggable
             onDragStart={() => handleDragStart(displayIdx)}
             onDragOver={(e) => handleDragOver(e, displayIdx)}
@@ -131,7 +135,9 @@ interface ThumbProps {
   onClick    : () => void;
   onDelete   : () => void;
   onRestore  : () => void;
-  draggable  : boolean;
+  onAddAfter?  : () => void;
+  onDuplicate? : () => void;
+  draggable    : boolean;
   onDragStart: () => void;
   onDragOver : (e: React.DragEvent) => void;
   onDrop     : () => void;
@@ -141,7 +147,7 @@ interface ThumbProps {
 
 function PageThumb({
   isActive, isDeleted, isDragOver, pageNum, children,
-  onClick, onDelete, onRestore,
+  onClick, onDelete, onRestore, onAddAfter, onDuplicate,
   draggable, onDragStart, onDragOver, onDrop, onDragEnd,
   ref,
 }: ThumbProps) {
@@ -186,13 +192,33 @@ function PageThumb({
               <RotateCcw className="w-3 h-3" />
             </button>
           ) : (
-            <button
-              onClick={e => { e.stopPropagation(); onDelete(); }}
-              className="text-[10px] text-destructive hover:text-red-600 flex items-center gap-0.5"
-              title="Delete page"
-            >
-              <Trash2 className="w-3 h-3" />
-            </button>
+            <div className="flex items-center gap-0.5">
+              {onDuplicate && (
+                <button
+                  onClick={e => { e.stopPropagation(); onDuplicate(); }}
+                  className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-0.5"
+                  title="Duplicate page"
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              )}
+              {onAddAfter && (
+                <button
+                  onClick={e => { e.stopPropagation(); onAddAfter(); }}
+                  className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-0.5"
+                  title="Add blank page after"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+              )}
+              <button
+                onClick={e => { e.stopPropagation(); onDelete(); }}
+                className="text-[10px] text-destructive hover:text-red-600 flex items-center gap-0.5"
+                title="Delete page"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            </div>
           )
         )}
       </div>

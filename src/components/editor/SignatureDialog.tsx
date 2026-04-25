@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { X, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface Props {
@@ -19,13 +19,15 @@ const SIG_FONTS = [
 ];
 
 export default function SignatureDialog({ open, onClose, onPlace }: Props) {
-  const [tab,       setTab]       = useState<"draw" | "type">("draw");
-  const [typeText,  setTypeText]  = useState("");
-  const [typeFont,  setTypeFont]  = useState(SIG_FONTS[0].value);
-  const [color,     setColor]     = useState("#000000");
-  const [hasDrawing,setHasDrawing]= useState(false);
+  const [tab,        setTab]        = useState<"draw" | "type" | "image">("draw");
+  const [typeText,   setTypeText]   = useState("");
+  const [typeFont,   setTypeFont]   = useState(SIG_FONTS[0].value);
+  const [color,      setColor]      = useState("#000000");
+  const [hasDrawing, setHasDrawing] = useState(false);
+  const [imgDataUrl, setImgDataUrl] = useState<string | null>(null);
 
   const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const fileRef    = useRef<HTMLInputElement>(null);
   const isDrawing  = useRef(false);
   const lastPt     = useRef<{ x: number; y: number } | null>(null);
 
@@ -79,9 +81,28 @@ export default function SignatureDialog({ open, onClose, onPlace }: Props) {
     setHasDrawing(false);
   };
 
+  // ── Image upload ──────────────────────────────────────────────────────────
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => setImgDataUrl(ev.target?.result as string);
+    reader.readAsDataURL(file);
+  };
+
   // ── Build PNG ─────────────────────────────────────────────────────────────
 
   const buildDataUrl = (): { dataUrl: string; aspectRatio: number } | null => {
+    if (tab === "image") {
+      if (!imgDataUrl) return null;
+      const img = new Image();
+      img.src = imgDataUrl;
+      const ar = img.naturalWidth && img.naturalHeight
+        ? img.naturalWidth / img.naturalHeight
+        : 3;
+      return { dataUrl: imgDataUrl, aspectRatio: ar || 3 };
+    }
     if (tab === "draw") {
       const canvas = canvasRef.current!;
       const ctx    = canvas.getContext("2d")!;
@@ -133,7 +154,10 @@ export default function SignatureDialog({ open, onClose, onPlace }: Props) {
     onClose();
   };
 
-  const canPlace = (tab === "draw" && hasDrawing) || (tab === "type" && typeText.trim().length > 0);
+  const canPlace =
+    (tab === "draw"  && hasDrawing) ||
+    (tab === "type"  && typeText.trim().length > 0) ||
+    (tab === "image" && imgDataUrl !== null);
 
   if (!open) return null;
 
@@ -154,9 +178,9 @@ export default function SignatureDialog({ open, onClose, onPlace }: Props) {
           </button>
         </div>
 
-        {/* Tabs + color */}
+        {/* Tabs + color (color only for draw/type) */}
         <div className="flex items-center border-b border-border/50">
-          {(["draw", "type"] as const).map((t) => (
+          {(["draw", "type", "image"] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -165,18 +189,17 @@ export default function SignatureDialog({ open, onClose, onPlace }: Props) {
                   ? "border-violet-500 text-violet-600 font-medium"
                   : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
-            >
-              {t}
-            </button>
+            >{t}</button>
           ))}
-          <div className="ml-auto flex items-center gap-2 pb-1">
-            <span className="text-xs text-muted-foreground">Color</span>
-            <label className="relative w-6 h-6 rounded cursor-pointer border border-border" title="Pen color"
-              style={{ background: color }}>
-              <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
-                className="absolute inset-0 opacity-0 w-full h-full cursor-pointer" />
-            </label>
-          </div>
+          {tab !== "image" && (
+            <div className="ml-auto flex items-center gap-2 pb-1">
+              <span className="text-xs text-muted-foreground">Color</span>
+              <label className="relative w-6 h-6 rounded cursor-pointer border border-border" style={{ background: color }}>
+                <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
+                  className="absolute inset-0 opacity-0 w-full h-full cursor-pointer" />
+              </label>
+            </div>
+          )}
         </div>
 
         {/* Draw tab */}
@@ -205,7 +228,9 @@ export default function SignatureDialog({ open, onClose, onPlace }: Props) {
               className="h-[90px] flex items-center border border-border/50 rounded-lg px-4 bg-white overflow-hidden"
               style={{ fontFamily: typeFont, fontSize: 44, color }}
             >
-              <span style={{ whiteSpace: "nowrap" }}>{typeText || <span className="text-gray-300 text-2xl font-sans">Type your name…</span>}</span>
+              <span style={{ whiteSpace: "nowrap" }}>
+                {typeText || <span className="text-gray-300 text-2xl font-sans">Type your name…</span>}
+              </span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -225,6 +250,35 @@ export default function SignatureDialog({ open, onClose, onPlace }: Props) {
                 ))}
               </select>
             </div>
+          </div>
+        )}
+
+        {/* Image tab */}
+        {tab === "image" && (
+          <div className="flex flex-col gap-3">
+            {imgDataUrl ? (
+              <div className="relative h-[120px] border border-border/50 rounded-lg bg-white flex items-center justify-center overflow-hidden">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={imgDataUrl} alt="signature" className="max-h-full max-w-full object-contain" />
+                <button
+                  onClick={() => { setImgDataUrl(null); if (fileRef.current) fileRef.current.value = ""; }}
+                  className="absolute top-2 right-2 w-6 h-6 rounded-full bg-destructive flex items-center justify-center"
+                >
+                  <X className="w-3 h-3 text-white" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => fileRef.current?.click()}
+                className="h-[120px] rounded-lg border-2 border-dashed border-border/60 hover:border-violet-400 flex flex-col items-center justify-center gap-2 text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <Upload className="w-6 h-6" />
+                <span className="text-sm">Click to upload image</span>
+                <span className="text-xs opacity-60">PNG, JPG, SVG…</span>
+              </button>
+            )}
+            <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+            <p className="text-xs text-muted-foreground">The image will be placed on the document as-is. Use a transparent PNG for best results.</p>
           </div>
         )}
 

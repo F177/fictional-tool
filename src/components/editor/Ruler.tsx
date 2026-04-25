@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 
 export const RULER_SIZE = 18;
 
@@ -9,13 +9,14 @@ const LABEL = "#888888";
 const CURSOR_COLOR = "#a78bfa";
 
 interface Props {
-  orientation : "h" | "v";
-  totalPts    : number;   // page dimension in PDF points
-  scale       : number;   // display px per PDF point
-  cursorPt?   : number;   // cursor position in PDF points (undefined = hidden)
+  orientation  : "h" | "v";
+  totalPts     : number;   // page dimension in PDF points
+  scale        : number;   // display px per PDF point
+  cursorPt?    : number;   // cursor position in PDF points (undefined = hidden)
+  onMouseDown? : (e: React.MouseEvent<HTMLDivElement>) => void;
 }
 
-export default function Ruler({ orientation, totalPts, scale, cursorPt }: Props) {
+export default function Ruler({ orientation, totalPts, scale, cursorPt, onMouseDown }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isH       = orientation === "h";
   const lengthPx  = totalPts * scale;
@@ -87,8 +88,11 @@ export default function Ruler({ orientation, totalPts, scale, cursorPt }: Props)
   const cursorPx = cursorPt !== undefined ? cursorPt * scale : undefined;
 
   return (
-    <div style={{ position: "relative", flexShrink: 0, width: w, height: h }}>
-      <canvas ref={canvasRef} style={{ display: "block" }} />
+    <div
+      style={{ position: "relative", flexShrink: 0, width: w, height: h, cursor: "crosshair" }}
+      onMouseDown={onMouseDown}
+    >
+      <canvas ref={canvasRef} style={{ display: "block", pointerEvents: "none" }} />
       {cursorPx !== undefined && (
         <div
           style={{

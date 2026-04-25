@@ -12,8 +12,9 @@ import LayersPanel from "./LayersPanel";
 import InlineFormatBar from "./InlineFormatBar";
 import Toolbar, { ZOOM_STEPS, type ActiveFormat } from "./Toolbar";
 import FindReplace from "./FindReplace";
-import { uploadPdf, waitForJob, fetchOutline, type ApiPage, type WordEdit, type AddedWordItem, type AddedImageItem, type CellRef, type FormatPatch, type DrawnShape, type DrawTool, type StickyNote, type GroupDef, type LinkAnnotation, type BookmarkEntry } from "@/lib/api";
+import { uploadPdf, waitForJob, fetchOutline, type ApiPage, type WordEdit, type AddedWordItem, type AddedImageItem, type CellRef, type FormatPatch, type DrawnShape, type DrawTool, type StickyNote, type GroupDef, type LinkAnnotation, type BookmarkEntry, type RedactionZone, type CropBox, type PageNumberConfig } from "@/lib/api";
 import SignatureDialog from "./SignatureDialog";
+import PageNumbersDialog from "./PageNumbersDialog";
 import ShapeFormatBar from "./ShapeFormatBar";
 import BookmarksPanel from "./BookmarksPanel";
 import LinkDialog from "./LinkDialog";
@@ -27,26 +28,30 @@ type Status = "idle" | "uploading" | "processing" | "done" | "error";
 
 // ── History reducer ────────────────────────────────────────────────────────────
 
-type Edits    = Record<number, Record<number, WordEdit>>;
-type Added    = Record<number, AddedWordItem[]>;
-type Images   = Record<number, AddedImageItem[]>;
-type Drawings    = Record<number, DrawnShape[]>;
-type Notes       = Record<number, StickyNote[]>;
-type FormValues  = Record<number, Record<string, string>>;
-type Links       = Record<number, LinkAnnotation[]>;
+type Edits          = Record<number, Record<number, WordEdit>>;
+type Added          = Record<number, AddedWordItem[]>;
+type Images         = Record<number, AddedImageItem[]>;
+type Drawings       = Record<number, DrawnShape[]>;
+type Notes          = Record<number, StickyNote[]>;
+type FormValues     = Record<number, Record<string, string>>;
+type Links          = Record<number, LinkAnnotation[]>;
+type RedactionZones = Record<number, RedactionZone[]>;
+type CropBoxes      = Record<number, CropBox>;
 
 type Snapshot = {
-  edits       : Edits;
-  added       : Added;
-  addedImages : Images;
-  rotations   : Record<number, number>;
-  deletedPages: number[];
-  drawings    : Drawings;
-  stickyNotes : Notes;
-  formValues  : FormValues;
-  pageOrder   : number[];   // display order → original page index
-  groups      : GroupDef[];
-  links       : Links;
+  edits          : Edits;
+  added          : Added;
+  addedImages    : Images;
+  rotations      : Record<number, number>;
+  deletedPages   : number[];
+  drawings       : Drawings;
+  stickyNotes    : Notes;
+  formValues     : FormValues;
+  pageOrder      : number[];   // display order → original page index
+  groups         : GroupDef[];
+  links          : Links;
+  redactionZones : RedactionZones;
+  cropBoxes      : CropBoxes;
 };
 
 export type HistoryIconType =
@@ -86,7 +91,10 @@ type PrimitiveAction =
   | { type: "addLink";    pageIdx: number; link: LinkAnnotation }
   | { type: "editLink";   pageIdx: number; id: string; link: LinkAnnotation }
   | { type: "removeLink"; pageIdx: number; id: string }
-  | { type: "editShape";  pageIdx: number; id: string; shape: DrawnShape };
+  | { type: "editShape";          pageIdx: number; id: string; shape: DrawnShape }
+  | { type: "addRedactionZone";   pageIdx: number; zone: RedactionZone }
+  | { type: "removeRedactionZone"; pageIdx: number; id: string }
+  | { type: "setCropBox";         pageIdx: number; box: CropBox | null };
 
 type HistoryAction =
   | PrimitiveAction
@@ -150,6 +158,16 @@ function applySubAction(current: Snapshot, action: PrimitiveAction): Snapshot {
       const existing = current.drawings[action.pageIdx] ?? [];
       return { ...current, drawings: { ...current.drawings, [action.pageIdx]: existing.map(s => s.id === action.id ? action.shape : s) } };
     }
+    case "addRedactionZone":
+      return { ...current, redactionZones: { ...current.redactionZones, [action.pageIdx]: [...(current.redactionZones[action.pageIdx] ?? []), action.zone] } };
+    case "removeRedactionZone":
+      return { ...current, redactionZones: { ...current.redactionZones, [action.pageIdx]: (current.redactionZones[action.pageIdx] ?? []).filter(z => z.id !== action.id) } };
+    case "setCropBox": {
+      const boxes = { ...current.cropBoxes };
+      if (action.box === null) delete boxes[action.pageIdx];
+      else boxes[action.pageIdx] = action.box;
+      return { ...current, cropBoxes: boxes };
+    }
   }
 }
 
@@ -179,7 +197,10 @@ function getMeta(action: PrimitiveAction): HistoryMeta {
     case "addLink":       return { label: `Added link — page ${p}`,   iconType: "addText",  timestamp: ts };
     case "editLink":      return { label: `Edited link — page ${p}`,  iconType: "text",     timestamp: ts };
     case "removeLink":    return { label: `Removed link — page ${p}`, iconType: "deleteText", timestamp: ts };
-    case "editShape":     return { label: `Edited shape — page ${p}`,  iconType: "image",      timestamp: ts };
+    case "editShape":          return { label: `Edited shape — page ${p}`,     iconType: "image",       timestamp: ts };
+    case "addRedactionZone":   return { label: `Redacted area — page ${p}`,    iconType: "deleteText",  timestamp: ts };
+    case "removeRedactionZone":return { label: `Removed redaction — page ${p}`,iconType: "text",        timestamp: ts };
+    case "setCropBox":         return { label: `Cropped page ${p}`,             iconType: "rotate",      timestamp: ts };
   }
 }
 
@@ -267,7 +288,7 @@ export default function EditorClient() {
   const [drawWidth,   setDrawWidth]   = useState(2);
   const [drawFill,    setDrawFill]    = useState<string | null>(null);
   const [drawOpacity, setDrawOpacity] = useState(1);
-  const [pageFilter,  setPageFilter]  = useState<"original" | "color" | "grayscale" | "bw" | "highcontrast">("original");
+  const [pageFilter,  setPageFilter]  = useState<"original" | "color" | "grayscale" | "bw" | "highcontrast" | "sepia" | "warm" | "cool" | "invert">("original");
   const [darkMode,    setDarkMode]    = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("thepdf-dark") === "1" || document.documentElement.classList.contains("dark");
@@ -278,6 +299,8 @@ export default function EditorClient() {
   const [watermarkOpen,   setWatermarkOpen]   = useState(false);
   const [exportOptsOpen,  setExportOptsOpen]  = useState(false);
   const [rulerCursor,    setRulerCursor]    = useState<{ x: number; y: number } | undefined>();
+  const [guides, setGuides] = useState<Array<{ id: string; orientation: "h" | "v"; scrollPx: number }>>([]);
+  const [guideMenu, setGuideMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [bookmarks,          setBookmarks]          = useState<BookmarkEntry[]>([]);
   const [bookmarksOpen,      setBookmarksOpen]      = useState(false);
   const [bookmarkPlaceMode,  setBookmarkPlaceMode]  = useState(false);
@@ -288,6 +311,9 @@ export default function EditorClient() {
     id?    : string;
     x      : number; y: number; w: number; h: number;
   } | null>(null);
+  const [cropMode,           setCropMode]           = useState(false);
+  const [pageNumberConfig,   setPageNumberConfig]   = useState<PageNumberConfig | null>(null);
+  const [pageNumbersOpen,    setPageNumbersOpen]    = useState(false);
   const [selectedShapeId, setSelectedShapeId] = useState<{ pageIdx: number; id: string } | null>(null);
   const selectedShapeIdRef = useRef<{ pageIdx: number; id: string } | null>(null);
   const [shapeBarPos, setShapeBarPos] = useState<{ x: number; y: number } | null>(null);
@@ -305,11 +331,11 @@ export default function EditorClient() {
   const fileHashRef = useRef<string>("");
 
   const [{ snapshots, meta: historyMeta, index }, dispatch] = useReducer(historyReducer, {
-    snapshots: [{ edits: {}, added: {}, addedImages: {}, rotations: {}, deletedPages: [], drawings: {}, stickyNotes: {}, formValues: {}, pageOrder: [], groups: [], links: {} }],
+    snapshots: [{ edits: {}, added: {}, addedImages: {}, rotations: {}, deletedPages: [], drawings: {}, stickyNotes: {}, formValues: {}, pageOrder: [], groups: [], links: {}, redactionZones: {}, cropBoxes: {} }],
     meta     : [{ label: "Document opened", iconType: "text" as HistoryIconType, timestamp: Date.now() }],
     index    : 0,
   });
-  const { edits, added, addedImages, rotations, deletedPages, drawings, stickyNotes, formValues, pageOrder: rawPageOrder, groups, links } = snapshots[index];
+  const { edits, added, addedImages, rotations, deletedPages, drawings, stickyNotes, formValues, pageOrder: rawPageOrder, groups, links, redactionZones, cropBoxes } = snapshots[index];
   // Derive effective page order: init from pages.length if snapshot has none yet
   const pageOrder = rawPageOrder.length > 0 ? rawPageOrder : pages.map((_, i) => i);
   const canUndo = index > 0;
@@ -347,6 +373,36 @@ export default function EditorClient() {
   }, [darkMode]);
 
   const mainScrollRef = useRef<HTMLElement>(null);
+
+  const startGuideDrag = (orientation: "h" | "v") => {
+    const draft = document.createElement("div");
+    draft.style.cssText = `position:fixed;z-index:9999;pointer-events:none;background:#3b82f6;opacity:0.8;${
+      orientation === "h" ? "left:0;right:0;height:1px;" : "top:0;bottom:0;width:1px;"
+    }`;
+    document.body.appendChild(draft);
+
+    const onMove = (e: MouseEvent) => {
+      if (orientation === "h") draft.style.top = `${e.clientY}px`;
+      else                      draft.style.left = `${e.clientX}px`;
+    };
+    const onUp = (e: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup",   onUp);
+      document.body.removeChild(draft);
+      const main = mainScrollRef.current;
+      if (!main) return;
+      const rect = main.getBoundingClientRect();
+      if (orientation === "h") {
+        if (e.clientY < rect.top || e.clientY > rect.bottom) return;
+        setGuides(prev => [...prev, { id: nanoid(), orientation, scrollPx: e.clientY - rect.top + main.scrollTop }]);
+      } else {
+        if (e.clientX < rect.left || e.clientX > rect.right) return;
+        setGuides(prev => [...prev, { id: nanoid(), orientation, scrollPx: e.clientX - rect.left + main.scrollLeft }]);
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup",   onUp);
+  };
 
   // Smooth Ctrl+wheel zoom — attach to window so it always fires even before pages load.
   // Zoom anchors to cursor position so content under cursor stays stationary.
@@ -537,6 +593,7 @@ export default function EditorClient() {
         highlight:     edit?.highlight     ?? null,
         textAlign:     "left",
         rotation:      0,
+        opacity:       edit?.opacity       ?? 1,
         isAddedWord:   false,
       };
     } else if (last.kind === "added") {
@@ -556,6 +613,7 @@ export default function EditorClient() {
         rotation:      item.rotation      ?? 0,
         lineHeight:    item.lineHeight    ?? 1.3,
         listType:      item.listType      ?? "none",
+        opacity:       item.opacity       ?? 1,
         isAddedWord:   true,
       };
     } else {
@@ -697,6 +755,7 @@ export default function EditorClient() {
             underline:     patch.underline     !== undefined ? patch.underline     : cur?.underline,
             strikethrough: patch.strikethrough !== undefined ? patch.strikethrough : cur?.strikethrough,
             highlight:     patch.highlight     !== undefined ? patch.highlight     : cur?.highlight,
+            opacity:       patch.opacity       !== undefined ? patch.opacity       : cur?.opacity,
             dx:            cur?.dx,
             dy:            cur?.dy,
           },
@@ -720,6 +779,7 @@ export default function EditorClient() {
             rotation:      patch.rotation      !== undefined ? patch.rotation      : item.rotation,
             lineHeight:    patch.lineHeight    !== undefined ? patch.lineHeight    : item.lineHeight,
             listType:      patch.listType      !== undefined ? patch.listType      : item.listType,
+            opacity:       patch.opacity       !== undefined ? patch.opacity       : item.opacity,
           },
         });
       }
@@ -770,6 +830,7 @@ export default function EditorClient() {
     setImgPlacement(null);
     setLinkMode(false);
     setBookmarkPlaceMode(false);
+    setCropMode(false);
   }, []);
 
   const handleDrawToolChange = useCallback((tool: DrawTool | null) => {
@@ -788,6 +849,51 @@ export default function EditorClient() {
     clearAllModes();
     setNoteMode(next);
   }, [noteMode, clearAllModes]);
+
+  const handleAddBlankPage = useCallback((afterDisplayIdx: number) => {
+    const newOrigIdx = pagesRef.current.length;
+    const ref = pagesRef.current[0];
+    const blankPage: ApiPage = {
+      page_num : newOrigIdx,
+      width    : ref?.width  ?? 595,
+      height   : ref?.height ?? 842,
+      image_url: "",
+      words    : [],
+    };
+    setPages(prev => [...prev, blankPage]);
+    const order = pageOrderRef.current;
+    const newOrder = [...order];
+    newOrder.splice(afterDisplayIdx + 1, 0, newOrigIdx);
+    dispatch({ type: "setPageOrder", order: newOrder });
+  }, []);
+
+  const handleDuplicatePage = useCallback((afterDisplayIdx: number) => {
+    const origIdx = pageOrderRef.current[afterDisplayIdx];
+    if (origIdx === undefined) return;
+    const srcPage = pagesRef.current[origIdx];
+    if (!srcPage) return;
+
+    const newOrigIdx = pagesRef.current.length;
+    setPages(prev => [...prev, { ...srcPage, page_num: newOrigIdx }]);
+
+    const subActions: PrimitiveAction[] = [];
+
+    for (const [wordIdxStr, wordEdit] of Object.entries(editsRef.current[origIdx] ?? {})) {
+      subActions.push({ type: "edit", pageIdx: newOrigIdx, wordIdx: Number(wordIdxStr), wordEdit });
+    }
+    for (const w of (addedRef.current[origIdx] ?? [])) {
+      subActions.push({ type: "addWord", pageIdx: newOrigIdx, word: { ...w, id: nanoid() } });
+    }
+    for (const img of (addedImagesRef.current[origIdx] ?? [])) {
+      subActions.push({ type: "addImage", pageIdx: newOrigIdx, img: { ...img, id: nanoid() } });
+    }
+
+    const newOrder = [...pageOrderRef.current];
+    newOrder.splice(afterDisplayIdx + 1, 0, newOrigIdx);
+    subActions.push({ type: "setPageOrder", order: newOrder });
+
+    dispatch({ type: "batch", label: "Duplicate page", iconType: "text", subActions });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleRedactWord = useCallback((pageIdx: number, wordIdx: number) => {
     const word = pagesRef.current[pageIdx]?.words[wordIdx];
@@ -1303,6 +1409,10 @@ export default function EditorClient() {
         onNoteToggle={handleNoteToggle}
         hasWatermark={watermark !== null}
         onWatermarkToggle={() => setWatermarkOpen(true)}
+        cropMode={cropMode}
+        onCropToggle={() => { const next = !cropMode; clearAllModes(); setCropMode(next); }}
+        hasPageNumbers={pageNumberConfig !== null}
+        onPageNumbers={() => setPageNumbersOpen(true)}
         canGroup={canGroup}
         canUngroup={canUngroup}
         onGroup={handleGroup}
@@ -1332,6 +1442,8 @@ export default function EditorClient() {
             onDeletePage={(origIdx) => dispatch({ type: "deletePage",  pageIdx: origIdx })}
             onRestorePage={(origIdx) => dispatch({ type: "restorePage", pageIdx: origIdx })}
             onReorder={(order) => dispatch({ type: "setPageOrder", order })}
+            onAddBlankPage={handleAddBlankPage}
+            onDuplicatePage={handleDuplicatePage}
           />
         )}
 
@@ -1341,20 +1453,20 @@ export default function EditorClient() {
           <div className="flex shrink-0" style={{ height: RULER_SIZE }}>
             <div style={{ width: RULER_SIZE, height: RULER_SIZE, background: "#252525", borderRight: "1px solid #444", borderBottom: "1px solid #444", flexShrink: 0 }} />
             <div style={{ flex: 1, overflow: "hidden", height: RULER_SIZE }}>
-              <Ruler orientation="h" totalPts={2000} scale={rulerScale} cursorPt={rulerCursor?.x} />
+              <Ruler orientation="h" totalPts={2000} scale={rulerScale} cursorPt={rulerCursor?.x} onMouseDown={() => startGuideDrag("h")} />
             </div>
           </div>
 
           {/* V ruler + scroll area */}
           <div className="flex flex-1 overflow-hidden">
             <div style={{ width: RULER_SIZE, flexShrink: 0, overflow: "hidden" }}>
-              <Ruler orientation="v" totalPts={5000} scale={rulerScale} cursorPt={rulerCursor?.y} />
+              <Ruler orientation="v" totalPts={5000} scale={rulerScale} cursorPt={rulerCursor?.y} onMouseDown={() => startGuideDrag("v")} />
             </div>
 
         {/* Pages */}
         <main
           ref={mainScrollRef as React.RefObject<HTMLDivElement>}
-          className="flex-1 overflow-auto bg-zinc-200 dark:bg-zinc-800"
+          className="flex-1 overflow-auto bg-zinc-200 dark:bg-zinc-800 relative"
           onDragOver={handleDragOver}
           onDrop={handleDrop}
           onMouseMove={(e) => {
@@ -1367,11 +1479,33 @@ export default function EditorClient() {
             });
           }}
           onMouseLeave={() => setRulerCursor(undefined)}
+          onClick={() => setGuideMenu(null)}
         >
+          {/* Guide lines */}
+          {guides.map(g => (
+            <div
+              key={g.id}
+              onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setGuideMenu({ id: g.id, x: e.clientX, y: e.clientY }); }}
+              style={{
+                position    : "absolute",
+                background  : "#3b82f6",
+                opacity     : 0.65,
+                zIndex      : 50,
+                pointerEvents: "auto",
+                cursor      : g.orientation === "h" ? "ns-resize" : "ew-resize",
+                ...(g.orientation === "h"
+                  ? { top: g.scrollPx - 0.5, left: 0, right: 0, height: 2 }
+                  : { left: g.scrollPx - 0.5, top: 0, bottom: 0, width: 2 }),
+              }}
+            />
+          ))}
           <div className="flex flex-col items-center gap-8 py-8 px-4">
-            {pageOrder.map((origIdx, displayIdx) => {
-              const page = pages[origIdx];
-              if (!page || deletedSet.has(origIdx)) return null;
+            {(() => {
+              const visiblePageOrder = pageOrder.filter(i => !deletedSet.has(i));
+              return pageOrder.map((origIdx, displayIdx) => {
+                const page = pages[origIdx];
+                if (!page || deletedSet.has(origIdx)) return null;
+                const visibleDisplayIdx = visiblePageOrder.indexOf(origIdx);
               const inWindow = displayIdx >= visibleRange[0] && displayIdx <= visibleRange[1];
               const placeholderH = Math.round(page.height * displayWidth / page.width);
               if (!inWindow) {
@@ -1412,7 +1546,11 @@ export default function EditorClient() {
                     onPlaceImage={imgPlacement ? (xPt, yPt) => handlePlaceImageAt(origIdx, xPt, yPt) : undefined}
                     showEditIndicators={showEditIndicators}
                     drawings={drawings[origIdx] ?? []}
-                    onAddShape={(shape) => dispatch({ type: "addShape", pageIdx: origIdx, shape })}
+                    onAddShape={(shape) => {
+                      dispatch({ type: "addShape", pageIdx: origIdx, shape });
+                      setDrawTool(null);
+                      setSelectedShapeId({ pageIdx: origIdx, id: shape.id });
+                    }}
                     drawTool={drawTool}
                     drawColor={drawColor}
                     drawWidth={drawWidth}
@@ -1421,6 +1559,7 @@ export default function EditorClient() {
                     selectedShapeId={selectedShapeId?.pageIdx === origIdx ? selectedShapeId.id : null}
                     onSelectShape={(id) => setSelectedShapeId(id ? { pageIdx: origIdx, id } : null)}
                     onEditShape={(shape) => dispatch({ type: "editShape", pageIdx: origIdx, id: shape.id, shape })}
+                    onDeleteShape={(id) => { dispatch({ type: "removeShape", pageIdx: origIdx, id }); setSelectedShapeId(null); }}
                     stickyNotes={stickyNotes[origIdx] ?? []}
                     onAddNote={(xPt, yPt) => handleAddNote(origIdx, xPt, yPt)}
                     onEditNote={(id, note) => dispatch({ type: "editNote", pageIdx: origIdx, id, note })}
@@ -1446,10 +1585,21 @@ export default function EditorClient() {
                     bookmarkPlaceMode={bookmarkPlaceMode}
                     onPlaceBookmark={(xPt, yPt) => handlePlaceBookmark(origIdx, xPt, yPt)}
                     pageFilter={pageFilter}
+                    watermark={watermark}
+                    redactionZones={redactionZones[origIdx] ?? []}
+                    onAddRedactionZone={(zone) => dispatch({ type: "addRedactionZone", pageIdx: origIdx, zone })}
+                    onRemoveRedactionZone={(id) => dispatch({ type: "removeRedactionZone", pageIdx: origIdx, id })}
+                    cropBox={cropBoxes[origIdx] ?? null}
+                    cropMode={cropMode}
+                    onSetCropBox={(box) => dispatch({ type: "setCropBox", pageIdx: origIdx, box })}
+                    pageNumberConfig={pageNumberConfig}
+                    displayPageIndex={visibleDisplayIdx}
+                    totalPageCount={visiblePageOrder.length}
                   />
                 </div>
               );
-            })}
+              });
+            })()}
           </div>
         </main>
           </div>{/* V ruler + scroll area row */}
@@ -1575,6 +1725,32 @@ export default function EditorClient() {
           onSave={setWatermark}
           onClose={() => setWatermarkOpen(false)}
         />
+      )}
+
+      {/* Page numbers dialog */}
+      {pageNumbersOpen && (
+        <PageNumbersDialog
+          current={pageNumberConfig}
+          totalPages={pageOrder.filter(i => !deletedSet.has(i)).length}
+          onSave={setPageNumberConfig}
+          onClose={() => setPageNumbersOpen(false)}
+        />
+      )}
+
+      {/* Guide context menu */}
+      {guideMenu && (
+        <div
+          style={{ position: "fixed", top: guideMenu.y, left: guideMenu.x, zIndex: 9999 }}
+          className="bg-background border border-border rounded shadow-xl py-1 text-sm min-w-[140px]"
+          onMouseLeave={() => setGuideMenu(null)}
+        >
+          <button
+            className="px-3 py-1.5 hover:bg-accent w-full text-left text-destructive"
+            onClick={() => { setGuides(prev => prev.filter(g => g.id !== guideMenu.id)); setGuideMenu(null); }}
+          >
+            Delete guide
+          </button>
+        </div>
       )}
 
       {/* Export options dialog */}

@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import React from "react";
 import { Move, X } from "lucide-react";
-import { API_BASE, type ApiPage, type ApiWord, type WordEdit, type AddedWordItem, type AddedImageItem, type DrawnShape, type DrawTool, type StickyNote, type FormField, type GroupDef, type CellRef, type LinkAnnotation } from "@/lib/api";
+import { API_BASE, type ApiPage, type ApiWord, type WordEdit, type AddedWordItem, type AddedImageItem, type DrawnShape, type DrawTool, type StickyNote, type FormField, type GroupDef, type CellRef, type LinkAnnotation, type RedactionZone, type CropBox, type PageNumberConfig } from "@/lib/api";
+import { nanoid } from "@/lib/nanoid";
+import type { WatermarkConfig } from "./WatermarkDialog";
 import DrawingOverlay from "./DrawingOverlay";
 import StickyNoteOverlay from "./StickyNoteOverlay";
 import FormFieldOverlay from "./FormFieldOverlay";
@@ -381,10 +383,8 @@ function WordOverlay({
               position    : "absolute",
               top         : 0,
               left        : 0,
-              minWidth    : Math.max(w * 3, 220),
-              minHeight   : Math.max(h * 1.8, 32),
-              width       : "auto",
-              height      : "auto",
+              width       : Math.max(w, 40),
+              height      : Math.max(h, 18),
               fontSize    : baseFontPx,
               fontFamily,
               fontWeight,
@@ -425,6 +425,7 @@ function WordOverlay({
               lineHeight    : "1",
               whiteSpace    : "nowrap",
               color,
+              opacity       : wordEdit.opacity ?? 1,
               display       : "inline-block",
               pointerEvents : "none",
               userSelect    : "none",
@@ -629,7 +630,8 @@ function AddedWordOverlay({ item, scale, isSelected, onEdit, onSelect, onRemove,
             overflow: item.h ? "hidden" : undefined,
             fontSize: fontSizePx, fontFamily, fontWeight, fontStyle,
             textDecoration, textAlign: item.textAlign ?? "left",
-            color, whiteSpace: "pre-wrap", wordBreak: "break-word",
+            color, opacity: item.opacity ?? 1,
+            whiteSpace: "pre-wrap", wordBreak: "break-word",
             lineHeight: item.lineHeight ?? 1.3, cursor: "text", minWidth: item.w ? undefined : 40,
             padding: "1px 2px",
             outline: isSelected
@@ -948,6 +950,110 @@ function GroupBox({ groupId, x, y, w, h, scale, onGroupDragEnd }: GroupBoxProps)
   );
 }
 
+// ── CropOverlay ───────────────────────────────────────────────────────────────
+
+interface CropOverlayProps {
+  cropBox  : CropBox;
+  scale    : number;
+  pageW    : number;
+  pageH    : number;
+  onChange : (box: CropBox) => void;
+}
+
+function CropOverlay({ cropBox, scale, pageW, pageH, onChange }: CropOverlayProps) {
+  const lx = cropBox.x * scale;
+  const ty = cropBox.y * scale;
+  const rx = (cropBox.x + cropBox.w) * scale;
+  const by = (cropBox.y + cropBox.h) * scale;
+  const MIN_PT = 20;
+
+  const startResize = (edge: string, e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    const sx = e.clientX, sy = e.clientY;
+    const { x: ox, y: oy, w: ow, h: oh } = cropBox;
+
+    const compute = (ev: MouseEvent): CropBox => {
+      const ddx = (ev.clientX - sx) / scale;
+      const ddy = (ev.clientY - sy) / scale;
+      let nx = ox, ny = oy, nw = ow, nh = oh;
+
+      if (edge.includes("e")) { nw = Math.max(MIN_PT, ow + ddx); }
+      if (edge.includes("s")) { nh = Math.max(MIN_PT, oh + ddy); }
+      if (edge.includes("w")) {
+        const proposed = ow - ddx;
+        nw = Math.max(MIN_PT, proposed);
+        nx = ox + ow - nw;
+      }
+      if (edge.includes("n")) {
+        const proposed = oh - ddy;
+        nh = Math.max(MIN_PT, proposed);
+        ny = oy + oh - nh;
+      }
+
+      nx = Math.max(0, nx); ny = Math.max(0, ny);
+      if (nx + nw > pageW / scale) nw = pageW / scale - nx;
+      if (ny + nh > pageH / scale) nh = pageH / scale - ny;
+      return { x: nx, y: ny, w: nw, h: nh };
+    };
+
+    const onMove = (ev: MouseEvent) => onChange(compute(ev));
+    const onUp   = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      onChange(compute(ev));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup",   onUp);
+  };
+
+  // Handles sit inside the container (clamped) to avoid being clipped by overflow:hidden
+  const H = 10;
+  const cx = (v: number) => Math.max(1, Math.min(pageW - H - 1, v));
+  const cy = (v: number) => Math.max(1, Math.min(pageH - H - 1, v));
+  const handles = [
+    { edge: "n",  hx: cx((lx + rx) / 2 - H / 2), hy: cy(ty - H / 2), cursor: "n-resize"  },
+    { edge: "s",  hx: cx((lx + rx) / 2 - H / 2), hy: cy(by - H / 2), cursor: "s-resize"  },
+    { edge: "e",  hx: cx(rx - H / 2), hy: cy((ty + by) / 2 - H / 2), cursor: "e-resize"  },
+    { edge: "w",  hx: cx(lx - H / 2), hy: cy((ty + by) / 2 - H / 2), cursor: "w-resize"  },
+    { edge: "nw", hx: cx(lx - H / 2), hy: cy(ty - H / 2),             cursor: "nw-resize" },
+    { edge: "ne", hx: cx(rx - H / 2), hy: cy(ty - H / 2),             cursor: "ne-resize" },
+    { edge: "sw", hx: cx(lx - H / 2), hy: cy(by - H / 2),             cursor: "sw-resize" },
+    { edge: "se", hx: cx(rx - H / 2), hy: cy(by - H / 2),             cursor: "se-resize" },
+  ];
+
+  const mask = "rgba(0,0,0,0.55)";
+  return (
+    <>
+      {/* Dark mask — 4 rects outside crop box */}
+      <div style={{ position: "absolute", left: 0, top: 0,  width: pageW, height: ty,        background: mask, pointerEvents: "none", zIndex: 30 }} />
+      <div style={{ position: "absolute", left: 0, top: by, width: pageW, height: pageH - by, background: mask, pointerEvents: "none", zIndex: 30 }} />
+      <div style={{ position: "absolute", left: 0, top: ty, width: lx,    height: by - ty,    background: mask, pointerEvents: "none", zIndex: 30 }} />
+      <div style={{ position: "absolute", left: rx, top: ty, width: pageW - rx, height: by - ty, background: mask, pointerEvents: "none", zIndex: 30 }} />
+      {/* Crop border */}
+      <div style={{ position: "absolute", left: lx, top: ty, width: rx - lx, height: by - ty, border: "2px solid white", boxShadow: "0 0 0 1px rgba(0,0,0,0.6)", pointerEvents: "none", zIndex: 31 }} />
+      {/* Resize handles */}
+      {handles.map(({ edge, hx, hy, cursor }) => (
+        <div key={edge} onMouseDown={e => startResize(edge, e)}
+          style={{ position: "absolute", left: hx, top: hy, width: H, height: H, background: "white", border: "1.5px solid #333", cursor, zIndex: 32, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.4)" }}
+        />
+      ))}
+    </>
+  );
+}
+
+function buildPageNumberText(cfg: PageNumberConfig, displayIdx: number, total: number): string | null {
+  if (cfg.skipFirst && displayIdx === 0) return null;
+  const offset = cfg.skipFirst ? 1 : 0;
+  const num = cfg.startFrom + displayIdx - offset;
+  const lastNum = cfg.startFrom + total - 1 - offset;
+  switch (cfg.format) {
+    case "n":               return String(num);
+    case "page-n":          return `Page ${num}`;
+    case "n-of-total":      return `${num} of ${lastNum}`;
+    case "page-n-of-total": return `Page ${num} of ${lastNum}`;
+  }
+}
+
 // ── PageOverlay ───────────────────────────────────────────────────────────────
 
 interface Props {
@@ -1016,7 +1122,23 @@ interface Props {
   bookmarkPlaceMode  : boolean;
   onPlaceBookmark    : (xPt: number, yPt: number) => void;
   // Page filter
-  pageFilter?        : "original" | "color" | "grayscale" | "bw" | "highcontrast";
+  pageFilter?        : "original" | "color" | "grayscale" | "bw" | "highcontrast" | "sepia" | "warm" | "cool" | "invert";
+  // Watermark
+  watermark?         : WatermarkConfig | null;
+  // Shape delete
+  onDeleteShape?     : (id: string) => void;
+  // Redaction zones
+  redactionZones        : RedactionZone[];
+  onAddRedactionZone    : (zone: RedactionZone) => void;
+  onRemoveRedactionZone : (id: string) => void;
+  // Crop
+  cropBox    : CropBox | null;
+  cropMode   : boolean;
+  onSetCropBox: (box: CropBox | null) => void;
+  // Page numbers
+  pageNumberConfig  : PageNumberConfig | null;
+  displayPageIndex  : number;
+  totalPageCount    : number;
 }
 
 // Map visual (post-rotation) coordinates back to original page coordinates
@@ -1047,6 +1169,11 @@ export default function PageOverlay({
   links, linkMode, onLinkCreate, onLinkClick, onPageJump,
   bookmarkAnchors, bookmarkPlaceMode, onPlaceBookmark,
   pageFilter,
+  watermark,
+  onDeleteShape,
+  redactionZones, onAddRedactionZone, onRemoveRedactionZone,
+  cropBox, cropMode, onSetCropBox,
+  pageNumberConfig, displayPageIndex, totalPageCount,
 }: Props) {
   const scale         = displayWidth / page.width;
   const displayHeight = page.height * scale;
@@ -1228,6 +1355,42 @@ export default function PageOverlay({
     if (!isBackground) return;
     if (addTextMode || onPlaceImage || noteMode || drawTool || bookmarkPlaceMode) return;
 
+    // In redact mode, drag to create a new redaction zone
+    if (redactMode) {
+      const containerRect = pageContainerRef.current!.getBoundingClientRect();
+      const sx = e.clientX - containerRect.left;
+      const sy = e.clientY - containerRect.top;
+      let draft: { x: number; y: number; w: number; h: number } | null = null;
+      let draftEl: HTMLDivElement | null = null;
+
+      const onMove = (ev: MouseEvent) => {
+        const r = pageContainerRef.current?.getBoundingClientRect();
+        if (!r) return;
+        const ex = ev.clientX - r.left;
+        const ey = ev.clientY - r.top;
+        const x = Math.min(sx, ex), y = Math.min(sy, ey);
+        const w = Math.abs(ex - sx), h = Math.abs(ey - sy);
+        draft = { x: x / scale, y: y / scale, w: w / scale, h: h / scale };
+        if (!draftEl) {
+          draftEl = document.createElement("div");
+          draftEl.style.cssText = "position:absolute;background:#000;z-index:18;pointer-events:none;";
+          pageContainerRef.current?.appendChild(draftEl);
+        }
+        Object.assign(draftEl.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        if (draftEl) draftEl.remove();
+        if (draft && draft.w > 4 / scale && draft.h > 4 / scale) {
+          onAddRedactionZone({ id: nanoid(), ...draft });
+        }
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      return;
+    }
+
     const containerRect = pageContainerRef.current!.getBoundingClientRect();
     const sx = e.clientX - containerRect.left;
     const sy = e.clientY - containerRect.top;
@@ -1315,7 +1478,7 @@ export default function PageOverlay({
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [addTextMode, onPlaceImage, noteMode, drawTool, linkMode, bookmarkPlaceMode, scale, page.words, edits, addedWords, addedImages, pageIdx, onBoxSelect, onClearSelection, onLinkCreate]);
+  }, [addTextMode, onPlaceImage, noteMode, drawTool, linkMode, bookmarkPlaceMode, redactMode, scale, page.words, edits, addedWords, addedImages, pageIdx, onBoxSelect, onClearSelection, onLinkCreate, onAddRedactionZone]);
 
   return (
     <div style={{ width: wrapW, height: wrapH, position: "relative", userSelect: "none" }}>
@@ -1330,7 +1493,10 @@ export default function PageOverlay({
           top            : (wrapH - displayHeight) / 2,
           transform      : rot ? `rotate(${rot}deg)` : undefined,
           transformOrigin: "center center",
-          cursor         : (addTextMode || onPlaceImage || noteMode || linkMode || bookmarkPlaceMode) ? "crosshair" : "default",
+          cursor         : (addTextMode || onPlaceImage || noteMode || linkMode || bookmarkPlaceMode || redactMode || cropMode) ? "crosshair" : "default",
+          clipPath       : (!cropMode && cropBox)
+            ? `inset(${cropBox.y * scale}px ${(page.width - cropBox.x - cropBox.w) * scale}px ${(page.height - cropBox.y - cropBox.h) * scale}px ${cropBox.x * scale}px round 4px)`
+            : undefined,
         }}
         onMouseDown={handlePageMouseDown}
         onClick={(e) => {
@@ -1358,6 +1524,10 @@ export default function PageOverlay({
                     : pageFilter === "bw"           ? "grayscale(100%) contrast(200%)"
                     : pageFilter === "highcontrast" ? "contrast(200%) brightness(85%)"
                     : pageFilter === "color"        ? "saturate(150%) brightness(1.05)"
+                    : pageFilter === "sepia"        ? "sepia(80%)"
+                    : pageFilter === "warm"         ? "sepia(30%) saturate(130%) brightness(1.08)"
+                    : pageFilter === "cool"         ? "saturate(80%) brightness(1.05) hue-rotate(15deg)"
+                    : pageFilter === "invert"       ? "invert(100%)"
                     : "none",
             }}
           />
@@ -1442,6 +1612,7 @@ export default function PageOverlay({
             selectedShapeId={selectedShapeId}
             onSelectShape={onSelectShape}
             onEditShape={onEditShape}
+            onDelete={onDeleteShape}
           />
 
           {/* Form fields */}
@@ -1569,6 +1740,124 @@ export default function PageOverlay({
               </div>
             </div>
           ))}
+
+          {/* Watermark overlay */}
+          {watermark && (watermark.mode === "image" ? !!watermark.imageDataUrl : !!watermark.text) && (() => {
+            const sharedCellStyle: React.CSSProperties = {
+              display: "flex", alignItems: "center", justifyContent: "center",
+            };
+            const textEl = (size: number) => (
+              <span style={{
+                fontSize: size, color: watermark.color, opacity: watermark.opacity,
+                transform: `rotate(${-watermark.angle}deg)`,
+                fontWeight: "bold", userSelect: "none", whiteSpace: "nowrap",
+              }}>{watermark.text}</span>
+            );
+            const imgEl = (maxW: string, maxH: string) => (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={watermark.imageDataUrl} alt="watermark"
+                style={{
+                  maxWidth: maxW, maxHeight: maxH, objectFit: "contain",
+                  opacity: watermark.opacity,
+                  transform: `rotate(${-watermark.angle}deg) scale(${watermark.imageScale ?? 1})`,
+                  userSelect: "none", pointerEvents: "none",
+                }} />
+            );
+            if (watermark.tile) {
+              return (
+                <div style={{
+                  position: "absolute", inset: 0, pointerEvents: "none", zIndex: 19, overflow: "hidden",
+                  display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gridTemplateRows: "repeat(4, 1fr)",
+                }}>
+                  {Array.from({ length: 12 }).map((_, i) => (
+                    <div key={i} style={sharedCellStyle}>
+                      {watermark.mode === "image"
+                        ? imgEl("90%", "90%")
+                        : textEl(watermark.fontSize * scale * 0.45)}
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+            return (
+              <div style={{
+                position: "absolute", inset: 0, pointerEvents: "none", zIndex: 19,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {watermark.mode === "image"
+                  ? imgEl("60%", "60%")
+                  : textEl(watermark.fontSize * scale)}
+              </div>
+            );
+          })()}
+
+          {/* Redaction zones — solid black boxes; click to remove in redact mode */}
+          {redactionZones.map(zone => (
+            <div
+              key={zone.id}
+              onClick={redactMode ? (e) => { e.stopPropagation(); onRemoveRedactionZone(zone.id); } : undefined}
+              style={{
+                position: "absolute",
+                left    : zone.x * scale,
+                top     : zone.y * scale,
+                width   : zone.w * scale,
+                height  : zone.h * scale,
+                background: "#000",
+                zIndex  : 18,
+                cursor  : redactMode ? "pointer" : "default",
+                outline : redactMode ? "2px dashed rgba(239,68,68,0.7)" : "none",
+              }}
+              title={redactMode ? "Click to remove redaction" : undefined}
+            />
+          ))}
+
+          {/* Crop overlay — shown when cropMode is active */}
+          {cropMode && (
+            <CropOverlay
+              cropBox={cropBox ?? { x: 0, y: 0, w: page.width, h: page.height }}
+              scale={scale}
+              pageW={displayWidth}
+              pageH={displayHeight}
+              onChange={onSetCropBox}
+            />
+          )}
+
+          {/* Crop border indicator — shown when a crop box exists and not in crop mode */}
+          {!cropMode && cropBox && (
+            <div style={{
+              position: "absolute",
+              left  : cropBox.x * scale,
+              top   : cropBox.y * scale,
+              width : cropBox.w * scale,
+              height: cropBox.h * scale,
+              border: "1.5px dashed rgba(139,92,246,0.6)",
+              pointerEvents: "none",
+              zIndex: 18,
+            }} />
+          )}
+
+          {/* Page numbers */}
+          {pageNumberConfig && (() => {
+            const text = buildPageNumberText(pageNumberConfig, displayPageIndex, totalPageCount);
+            if (!text) return null;
+            const pos = pageNumberConfig.position;
+            const m = pageNumberConfig.margin * scale;
+            const style: React.CSSProperties = {
+              position  : "absolute",
+              fontSize  : pageNumberConfig.fontSize * scale,
+              color     : pageNumberConfig.color,
+              fontFamily: "Arial, sans-serif",
+              pointerEvents: "none",
+              userSelect: "none",
+              zIndex    : 21,
+              whiteSpace: "nowrap",
+              ...(pos.startsWith("top")   ? { top: m }    : { bottom: m }),
+              ...(pos.endsWith("left")    ? { left: m }
+                : pos.endsWith("right")   ? { right: m }
+                : { left: "50%", transform: "translateX(-50%)" }),
+            };
+            return <div style={style}>{text}</div>;
+          })()}
 
           {/* Placement-mode overlay (text / image / note / bookmark) */}
           {(addTextMode || onPlaceImage || noteMode || bookmarkPlaceMode) && (

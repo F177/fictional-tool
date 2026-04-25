@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useCallback } from "react";
+import { X } from "lucide-react";
 import type { DrawnShape, DrawTool } from "@/lib/api";
 import { nanoid } from "@/lib/nanoid";
 
@@ -16,6 +17,7 @@ interface Props {
   selectedShapeId: string | null;
   onSelectShape  : (id: string | null) => void;
   onEditShape    : (shape: DrawnShape) => void;
+  onDelete?      : (id: string) => void;
 }
 
 function starPoints(cx: number, cy: number, outerR: number, innerR: number, points = 5): string {
@@ -130,7 +132,7 @@ function translateShape(s: DrawnShape, ddxPt: number, ddyPt: number): DrawnShape
 
 export default function DrawingOverlay({
   shapes, scale, drawTool, drawColor, drawWidth, drawFill, drawOpacity, onAdd,
-  selectedShapeId, onSelectShape, onEditShape,
+  selectedShapeId, onSelectShape, onEditShape, onDelete,
 }: Props) {
   const [draft, setDraft] = useState<DrawnShape | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -246,7 +248,7 @@ export default function DrawingOverlay({
       <svg
         style={{
           position: "absolute", inset: 0, width: "100%", height: "100%", overflow: "visible",
-          pointerEvents: (selectionMode || !!selectedShapeId) ? undefined : "none",
+          pointerEvents: (selectionMode || !!selectedShapeId) ? "auto" : "none",
         }}
       >
         {/* Background rect to catch clicks on empty space in selection mode */}
@@ -255,7 +257,7 @@ export default function DrawingOverlay({
             x={0} y={0} width="100%" height="100%"
             fill="transparent"
             onClick={() => onSelectShape(null)}
-            style={{ cursor: "default" }}
+            style={{ cursor: "default", pointerEvents: "all" }}
           />
         )}
 
@@ -293,7 +295,7 @@ export default function DrawingOverlay({
               width={(bb.w * scale) + pad * 2}
               height={(bb.h * scale) + pad * 2}
               fill="transparent"
-              style={{ cursor: "pointer" }}
+              style={{ cursor: "pointer", pointerEvents: "all" }}
               onClick={(e) => { e.stopPropagation(); onSelectShape(s.id); }}
             />
           );
@@ -338,7 +340,7 @@ export default function DrawingOverlay({
                   stroke="#f97316"
                   strokeWidth={1.5}
                   strokeDasharray="5,3"
-                  style={{ cursor: "move" }}
+                  style={{ cursor: "move", pointerEvents: "all" }}
                   onMouseDown={(e) => startMoveDrag(e, selectedShape)}
                 />
               )}
@@ -366,7 +368,7 @@ export default function DrawingOverlay({
                   stroke="#f97316"
                   strokeWidth={1.5}
                   rx={1}
-                  style={{ cursor: h.cursor }}
+                  style={{ cursor: h.cursor, pointerEvents: "all" }}
                   onMouseDown={(e) => startResizeDrag(e, selectedShape, h.id)}
                 />
               ))}
@@ -393,6 +395,36 @@ export default function DrawingOverlay({
               pointerEvents: "none",
             }}
           />
+        );
+      })()}
+
+      {/* Delete button for selected shape */}
+      {selectedShape && onDelete && (() => {
+        const bb = shapeBBox(selectedShape);
+        const bx = bb.x * scale;
+        const by = bb.y * scale;
+        const pad = 6;
+        return (
+          <div
+            onClick={(e) => { e.stopPropagation(); onDelete(selectedShape.id); }}
+            style={{
+              position: "absolute",
+              left: bx - pad - 9,
+              top: by - pad - 9,
+              width: 18, height: 18,
+              background: "#ef4444",
+              borderRadius: "50%",
+              border: "1.5px solid white",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer",
+              zIndex: 100,
+              pointerEvents: "auto",
+              boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+            }}
+            title="Delete shape (Del)"
+          >
+            <X style={{ width: 10, height: 10, color: "white" }} />
+          </div>
         );
       })()}
 

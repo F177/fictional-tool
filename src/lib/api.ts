@@ -85,6 +85,7 @@ export interface WordEdit {
   underline?    : boolean;
   strikethrough?: boolean;
   highlight?    : string | null;
+  opacity?      : number;    // 0–1, default 1
   dx?           : number;
   dy?           : number;
   deleted?      : boolean;
@@ -110,6 +111,7 @@ export interface AddedWordItem {
   rotation?     : number;  // degrees, 0 = upright
   lineHeight?   : number;  // CSS line-height multiplier, default 1.3
   listType?     : "none" | "bullet" | "numbered";
+  opacity?      : number;  // 0–1, default 1
   w?            : number;  // fixed width in PDF points (overrides auto-size)
   h?            : number;  // fixed height in PDF points
 }
@@ -128,6 +130,7 @@ export type FormatPatch = {
   rotation?     : number;
   lineHeight?   : number;
   listType?     : "none" | "bullet" | "numbered";
+  opacity?      : number;
 };
 
 /** A placed image or signature on a page. */
@@ -152,6 +155,34 @@ export type CellRef =
 export interface GroupDef {
   id     : string;
   members: CellRef[];
+}
+
+/** A free-form redaction zone (fills any arbitrary area with black). */
+export interface RedactionZone {
+  id: string;
+  x : number;  // PDF points from left
+  y : number;  // PDF points from top
+  w : number;
+  h : number;
+}
+
+/** Per-page crop box — clips the visible area of the page. */
+export interface CropBox {
+  x: number;  // PDF points from left
+  y: number;  // PDF points from top
+  w: number;
+  h: number;
+}
+
+/** Configuration for automatic page-number overlays. */
+export interface PageNumberConfig {
+  position : "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
+  format   : "n" | "page-n" | "n-of-total" | "page-n-of-total";
+  fontSize : number;   // pt
+  color    : string;   // CSS hex
+  startFrom: number;
+  margin   : number;   // PDF points from edge
+  skipFirst: boolean;
 }
 
 /** A clickable link region placed on a page. */
