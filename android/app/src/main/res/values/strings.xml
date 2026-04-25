@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ThePDF</string>
+    <string name="title_activity_main">ThePDF</string>
+    <string name="package_name">com.thepdf.app</string>
+    <string name="custom_url_scheme">com.thepdf.app</string>
+</resources>

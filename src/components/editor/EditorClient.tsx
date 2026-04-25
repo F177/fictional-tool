@@ -23,6 +23,7 @@ import ExportOptionsDialog, { type ExportOptions } from "./ExportOptionsDialog";
 import { exportPdfWithEdits } from "@/lib/pdf-utils";
 import { getPdf } from "@/lib/pdf-store";
 import { nanoid } from "@/lib/nanoid";
+import { savePdf } from "@/lib/native-save";
 
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
 
@@ -1283,13 +1284,7 @@ export default function EditorClient() {
         drawnShapesList, stickyNotesList, formValues,
         pageOrder, watermark, opts, linksList, bookmarksRef.current,
       );
-      const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/pdf" });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement("a");
-      a.href     = url;
-      a.download = pdfNameRef.current.replace(/\.pdf$/i, "") + "_edited.pdf";
-      a.click();
-      URL.revokeObjectURL(url);
+      await savePdf(bytes, pdfNameRef.current.replace(/\.pdf$/i, "") + "_edited.pdf");
     } catch (e) {
       alert("Export failed: " + (e instanceof Error ? e.message : String(e)));
     } finally {

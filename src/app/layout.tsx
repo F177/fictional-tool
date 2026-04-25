@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -16,6 +16,17 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "ThePDF – Edit PDFs Online",
   description: "A powerful, free PDF editor. Add text, annotate, draw, sign and download — all in your browser.",
+  manifest: "/manifest.json",
+  appleWebApp: { capable: true, statusBarStyle: "default", title: "ThePDF" },
+};
+
+export const viewport: Viewport = {
+  themeColor       : "#7c3aed",
+  width            : "device-width",
+  initialScale     : 1,
+  maximumScale     : 1,
+  userScalable     : false,
+  viewportFit      : "cover",
 };
 
 export default function RootLayout({

@@ -26,10 +26,14 @@ MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
+import os
+
 app = FastAPI(title="ThePDF API")
+
+_allowed = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_allowed,
     allow_methods=["*"],
     allow_headers=["*"],
 )
